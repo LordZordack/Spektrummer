@@ -1,0 +1,14 @@
+# CMake and Visual Studio build output
+/build/
+/out/
+/.vs/
+/CMakeFiles/
+/CMakeCache.txt
+/Testing/
+
+# JUCE-generated plug-in and application artefacts
+*.vst3/
+*.exe
+*.pdb
+*.ilk
+*.idb
