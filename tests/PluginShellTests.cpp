@@ -82,6 +82,20 @@ public:
             expectEquals (processor->getCurrentProgram(), 0);
         }
 
+        beginTest ("Editor construction");
+        {
+            auto processor = makeProcessor();
+            std::unique_ptr<juce::AudioProcessorEditor> editor { processor->createEditor() };
+            expect (editor != nullptr);
+
+            if (editor != nullptr)
+            {
+                expect (editor->getAudioProcessor() == processor.get());
+                expectEquals (editor->getWidth(), 560);
+                expectEquals (editor->getHeight(), 280);
+            }
+        }
+
         beginTest ("Only output-only mono and stereo layouts are accepted");
         {
             auto processor = makeProcessor();
@@ -126,6 +140,7 @@ PluginShellTests pluginShellTests;
 
 int main (int, char**)
 {
+    juce::ScopedJuceInitialiser_GUI guiInitialiser;
     juce::UnitTestRunner runner;
     runner.setAssertOnFailure (false);
     runner.runAllTests();
