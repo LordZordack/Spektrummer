@@ -32,9 +32,20 @@ target_sources(Spektrummer
         src/PluginProcessor.cpp
         src/PluginProcessor.h
         src/PluginEditor.cpp
-        src/PluginEditor.h)
+        src/PluginEditor.h
+        src/analyzer/AnalyzerSampleFifo.h
+        src/dsp/SpectralSynthEngine.cpp
+        src/dsp/SpectralSynthEngine.h
+        src/dsp/LockFreeFft.h
+        src/dsp/SynthMidiEvent.h
+        src/ui/SpectrumComponent.cpp
+        src/ui/SpectrumComponent.h)
 
 target_compile_features(Spektrummer PRIVATE cxx_std_20)
+
+target_include_directories(Spektrummer
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 target_compile_definitions(Spektrummer
     PRIVATE
@@ -45,6 +56,7 @@ target_compile_definitions(Spektrummer
 target_link_libraries(Spektrummer
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_dsp
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
@@ -60,10 +72,22 @@ if (BUILD_TESTING)
     target_sources(SpektrummerTests
         PRIVATE
             tests/PluginShellTests.cpp
+            tests/SpectralSynthEngineTests.cpp
+            tests/AnalyzerSampleFifoTests.cpp
+            tests/SpectrumComponentTests.cpp
+            tests/LockFreeFftTests.cpp
+            tests/SynthMidiEventTests.cpp
             src/PluginProcessor.cpp
             src/PluginProcessor.h
             src/PluginEditor.cpp
-            src/PluginEditor.h)
+            src/PluginEditor.h
+            src/analyzer/AnalyzerSampleFifo.h
+            src/dsp/SpectralSynthEngine.cpp
+            src/dsp/SpectralSynthEngine.h
+            src/dsp/LockFreeFft.h
+            src/dsp/SynthMidiEvent.h
+            src/ui/SpectrumComponent.cpp
+            src/ui/SpectrumComponent.h)
 
     target_compile_features(SpektrummerTests PRIVATE cxx_std_20)
 
@@ -80,6 +104,7 @@ if (BUILD_TESTING)
     target_link_libraries(SpektrummerTests
         PRIVATE
             juce::juce_audio_utils
+            juce::juce_dsp
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
 
