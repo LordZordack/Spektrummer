@@ -13,6 +13,10 @@ namespace
 constexpr auto parameterStateType = "PARAMETERS";
 constexpr auto outputLevelId = "outputLevel";
 constexpr auto maximumVoicesId = "maxVoices";
+constexpr auto attackId = "attack";
+constexpr auto decayId = "decay";
+constexpr auto sustainId = "sustain";
+constexpr auto releaseId = "release";
 constexpr auto minimumOutputLevelDb = -60.0f;
 constexpr auto outputGainRampSeconds = 0.02;
 constexpr std::array maximumVoiceChoices { 2, 4, 8, 16 };
@@ -31,11 +35,15 @@ std::optional<double> parseFiniteNumber (const juce::var& value)
 
 bool isValidParameterState (const juce::ValueTree& state)
 {
-    if (! state.isValid() || ! state.hasType (parameterStateType) || state.getNumChildren() != 2)
+    if (! state.isValid() || ! state.hasType (parameterStateType) || state.getNumChildren() != 6)
         return false;
 
     auto sawOutputLevel = false;
     auto sawMaximumVoices = false;
+    auto sawAttack = false;
+    auto sawDecay = false;
+    auto sawSustain = false;
+    auto sawRelease = false;
 
     for (const auto child : state)
     {
@@ -64,13 +72,42 @@ bool isValidParameterState (const juce::ValueTree& state)
 
             sawMaximumVoices = true;
         }
+        else if (id == attackId)
+        {
+            if (sawAttack || *numericValue < 0.0 || *numericValue > 5.0)
+                return false;
+
+            sawAttack = true;
+        }
+        else if (id == decayId)
+        {
+            if (sawDecay || *numericValue < 0.0 || *numericValue > 5.0)
+                return false;
+
+            sawDecay = true;
+        }
+        else if (id == sustainId)
+        {
+            if (sawSustain || *numericValue < 0.0 || *numericValue > 1.0)
+                return false;
+
+            sawSustain = true;
+        }
+        else if (id == releaseId)
+        {
+            if (sawRelease || *numericValue < 0.0 || *numericValue > 10.0)
+                return false;
+
+            sawRelease = true;
+        }
         else
         {
             return false;
         }
     }
 
-    return sawOutputLevel && sawMaximumVoices;
+    return sawOutputLevel && sawMaximumVoices && sawAttack && sawDecay
+        && sawSustain && sawRelease;
 }
 }
 
@@ -81,8 +118,16 @@ SpektrummerAudioProcessor::SpektrummerAudioProcessor()
 {
     outputLevelParameter = valueTreeState.getRawParameterValue (outputLevelId);
     maximumVoicesParameter = valueTreeState.getRawParameterValue (maximumVoicesId);
+    attackParameter = valueTreeState.getRawParameterValue (attackId);
+    decayParameter = valueTreeState.getRawParameterValue (decayId);
+    sustainParameter = valueTreeState.getRawParameterValue (sustainId);
+    releaseParameter = valueTreeState.getRawParameterValue (releaseId);
     jassert (outputLevelParameter != nullptr);
     jassert (maximumVoicesParameter != nullptr);
+    jassert (attackParameter != nullptr);
+    jassert (decayParameter != nullptr);
+    jassert (sustainParameter != nullptr);
+    jassert (releaseParameter != nullptr);
 }
 
 void SpektrummerAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -90,6 +135,7 @@ void SpektrummerAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     currentSampleRate = sampleRate;
     spectralSynth.prepare (sampleRate, samplesPerBlock);
     spectralSynth.setMaximumVoices (getRequestedMaximumVoices());
+    spectralSynth.setEnvelopeParameters (getRequestedEnvelopeParameters());
     outputGain.reset (sampleRate, outputGainRampSeconds);
     outputGain.setCurrentAndTargetValue (getRequestedOutputGain());
     analyzerSampleFifo.beginNewGeneration();
@@ -98,6 +144,7 @@ void SpektrummerAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 void SpektrummerAudioProcessor::releaseResources()
 {
     spectralSynth.reset();
+    spectralSynth.setEnvelopeParameters (getRequestedEnvelopeParameters());
     outputGain.setCurrentAndTargetValue (getRequestedOutputGain());
     analyzerSampleFifo.beginNewGeneration();
 }
@@ -105,6 +152,7 @@ void SpektrummerAudioProcessor::releaseResources()
 void SpektrummerAudioProcessor::reset()
 {
     spectralSynth.reset();
+    spectralSynth.setEnvelopeParameters (getRequestedEnvelopeParameters());
     outputGain.reset (currentSampleRate, outputGainRampSeconds);
     outputGain.setCurrentAndTargetValue (getRequestedOutputGain());
     analyzerSampleFifo.beginNewGeneration();
@@ -127,6 +175,7 @@ void SpektrummerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     buffer.clear();
 
     spectralSynth.setMaximumVoices (getRequestedMaximumVoices());
+    spectralSynth.setEnvelopeParameterTargets (getRequestedEnvelopeParameters());
 
     const auto applyMidiEvent = [this] (const auto& metadata)
     {
@@ -221,7 +270,11 @@ bool SpektrummerAudioProcessor::isMidiEffect() const
 
 double SpektrummerAudioProcessor::getTailLengthSeconds() const
 {
-    return spektrummer::dsp::SpectralSynthEngine::releaseSeconds
+    const auto releaseSeconds = releaseParameter != nullptr
+                                  ? releaseParameter->load (std::memory_order_relaxed)
+                                  : static_cast<float> (
+                                      spektrummer::dsp::SpectralSynthEngine::releaseSeconds);
+    return static_cast<double> (juce::jlimit (0.0f, 10.0f, releaseSeconds))
          + static_cast<double> (spektrummer::dsp::SpectralSynthEngine::fftSize)
              / std::max (1.0, currentSampleRate);
 }
@@ -304,6 +357,30 @@ SpektrummerAudioProcessor::createParameterLayout()
         "Maximum Voices",
         juce::StringArray { "2", "4", "8", "16" },
         2));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { attackId, 1 },
+        "Attack",
+        juce::NormalisableRange<float> { 0.0f, 5.0f, 0.001f },
+        0.010f,
+        juce::AudioParameterFloatAttributes {}.withLabel ("s")));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { decayId, 1 },
+        "Decay",
+        juce::NormalisableRange<float> { 0.0f, 5.0f, 0.001f },
+        0.100f,
+        juce::AudioParameterFloatAttributes {}.withLabel ("s")));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { sustainId, 1 },
+        "Sustain",
+        juce::NormalisableRange<float> { 0.0f, 1.0f, 0.001f },
+        0.800f,
+        juce::AudioParameterFloatAttributes {}));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { releaseId, 1 },
+        "Release",
+        juce::NormalisableRange<float> { 0.0f, 10.0f, 0.001f },
+        0.080f,
+        juce::AudioParameterFloatAttributes {}.withLabel ("s")));
     return layout;
 }
 
@@ -325,6 +402,22 @@ int SpektrummerAudioProcessor::getRequestedMaximumVoices() const noexcept
                           : 2;
     return maximumVoiceChoices[static_cast<std::size_t> (
         juce::jlimit (0, static_cast<int> (maximumVoiceChoices.size()) - 1, choice))];
+}
+
+spektrummer::dsp::SpectralSynthEngine::EnvelopeParameters
+SpektrummerAudioProcessor::getRequestedEnvelopeParameters() const noexcept
+{
+    const auto loadOr = [] (const std::atomic<float>* parameter, float fallback) noexcept
+    {
+        return parameter != nullptr ? parameter->load (std::memory_order_relaxed) : fallback;
+    };
+
+    return {
+        loadOr (attackParameter, 0.010f),
+        loadOr (decayParameter, 0.100f),
+        loadOr (sustainParameter, 0.800f),
+        loadOr (releaseParameter, 0.080f)
+    };
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

@@ -18,10 +18,21 @@ public:
     static constexpr int maximumVoiceCapacity = 16;
     static constexpr double releaseSeconds = 0.080;
 
+    struct EnvelopeParameters
+    {
+        float attackSeconds = 0.010f;
+        float decaySeconds = 0.100f;
+        float sustainLevel = 0.800f;
+        float releaseSeconds = 0.080f;
+    };
+
     void prepare (double newSampleRate, int maximumBlockSize) noexcept;
     void reset() noexcept;
 
     void setMaximumVoices (int requestedVoices) noexcept;
+    void setEnvelopeParameters (EnvelopeParameters newParameters) noexcept;
+    void setEnvelopeParameterTargets (EnvelopeParameters newParameters) noexcept;
+    [[nodiscard]] EnvelopeParameters getEnvelopeParameters() const noexcept;
     [[nodiscard]] int getMaximumVoices() const noexcept;
     [[nodiscard]] int getActiveVoiceCount() const noexcept;
     [[nodiscard]] bool isNoteActive (int midiChannel, int midiNote) const noexcept;
@@ -57,6 +68,8 @@ private:
     enum class EnvelopeStage
     {
         inactive,
+        attack,
+        decay,
         sustain,
         release
     };
@@ -67,6 +80,8 @@ private:
         int note = 0;
         float velocity = 0.0f;
         float envelope = 0.0f;
+        float releaseStartEnvelope = 0.0f;
+        double stageElapsedSeconds = 0.0;
         std::uint64_t age = 0;
         EnvelopeStage stage = EnvelopeStage::inactive;
         std::array<double, harmonicCount> phases {};
@@ -76,6 +91,9 @@ private:
     [[nodiscard]] Voice* findMatchingVoice (int midiChannel, int midiNote) noexcept;
     [[nodiscard]] Voice* findVoiceForNoteOn() noexcept;
     void enforceVoiceLimit() noexcept;
+    [[nodiscard]] static EnvelopeParameters sanitiseEnvelopeParameters (
+        EnvelopeParameters parameters) noexcept;
+    void advanceEnvelopeParameters() noexcept;
     void advanceEnvelope (Voice& voice) noexcept;
     void prepareSpectralKernels() noexcept;
     [[nodiscard]] static std::complex<double> dirichletKernel (double binOffset) noexcept;
@@ -92,6 +110,11 @@ private:
     std::array<float, fftSize> overlapBuffer {};
 
     double sampleRate = 44100.0;
+    EnvelopeParameters envelopeParameters;
+    EnvelopeParameters envelopeParameterTargets;
+    EnvelopeParameters envelopeParameterIncrements { 0.0f, 0.0f, 0.0f, 0.0f };
+    int envelopeParameterRampSamples = 882;
+    int envelopeParameterSamplesRemaining = 0;
     std::uint64_t nextVoiceAge = 0;
     int maximumVoices = 8;
     int outputIndex = 0;

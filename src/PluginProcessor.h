@@ -39,10 +39,16 @@ private:
     [[nodiscard]] static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     [[nodiscard]] float getRequestedOutputGain() const noexcept;
     [[nodiscard]] int getRequestedMaximumVoices() const noexcept;
+    [[nodiscard]] spektrummer::dsp::SpectralSynthEngine::EnvelopeParameters
+        getRequestedEnvelopeParameters() const noexcept;
 
     juce::AudioProcessorValueTreeState valueTreeState;
     std::atomic<float>* outputLevelParameter = nullptr;
     std::atomic<float>* maximumVoicesParameter = nullptr;
+    std::atomic<float>* attackParameter = nullptr;
+    std::atomic<float>* decayParameter = nullptr;
+    std::atomic<float>* sustainParameter = nullptr;
+    std::atomic<float>* releaseParameter = nullptr;
     spektrummer::dsp::SpectralSynthEngine spectralSynth;
     spektrummer::analyzer::AnalyzerSampleFifo analyzerSampleFifo;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outputGain;
