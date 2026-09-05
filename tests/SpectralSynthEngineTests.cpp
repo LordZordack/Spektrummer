@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 #include <numeric>
 #include <vector>
 
@@ -207,11 +208,140 @@ public:
             expect (engine.isNoteActive (1, 60));
         }
 
+        beginTest ("ADSR envelope rises, sustains, and releases from its current level");
+        {
+            auto engine = std::make_unique<SpectralSynthEngine>();
+            engine->prepare (48000.0, 128);
+            engine->setEnvelopeParameters ({ 0.020f, 0.020f, 0.25f, 0.030f });
+            engine->noteOn (1, 60, 1.0f);
+
+            std::vector<float> attackAndSustain (8192);
+            engine->render (attackAndSustain.data(), static_cast<int> (attackAndSustain.size()));
+            expect (std::all_of (attackAndSustain.begin(),
+                                 attackAndSustain.begin() + SpectralSynthEngine::hopSize,
+                                 [] (float sample) { return sample == 0.0f; }));
+            const auto onsetPeak = peakMagnitude (std::vector<float> (attackAndSustain.begin(),
+                                                                        attackAndSustain.begin() + 512));
+            const auto attackPeak = peakMagnitude (std::vector<float> (attackAndSustain.begin() + 512,
+                                                                         attackAndSustain.begin() + 2048));
+            const auto sustainPeak = peakMagnitude (std::vector<float> (attackAndSustain.begin() + 4096,
+                                                                          attackAndSustain.end()));
+            expectGreaterThan (attackPeak, onsetPeak);
+            expectGreaterThan (attackPeak, sustainPeak * 2.0f);
+            expectGreaterThan (sustainPeak, 0.0001f);
+
+            engine->noteOff (1, 60);
+            std::vector<float> release (8192);
+            engine->render (release.data(), static_cast<int> (release.size()));
+            expectGreaterThan (peakMagnitude (std::vector<float> (release.begin(),
+                                                                    release.begin() + 1024)),
+                               0.0001f);
+            expectEquals (engine->getActiveVoiceCount(), 0);
+            expect (std::all_of (release.end() - 512, release.end(), [] (float sample)
+            {
+                return sample == 0.0f;
+            }));
+        }
+
+        beginTest ("Note-off releases deterministically from attack, decay, and sustain");
+        {
+            struct StageCase
+            {
+                SpectralSynthEngine::EnvelopeParameters parameters;
+                int samplesBeforeNoteOff = 0;
+            };
+
+            for (const auto& stageCase : std::array {
+                     StageCase { { 1.0f, 0.1f, 0.5f, 0.03f }, 512 },
+                     StageCase { { 0.0f, 1.0f, 0.5f, 0.03f }, 512 },
+                     StageCase { { 0.0f, 0.0f, 0.5f, 0.03f }, 1024 } })
+            {
+                auto engine = std::make_unique<SpectralSynthEngine>();
+                engine->prepare (48000.0, 257);
+                engine->setEnvelopeParameters (stageCase.parameters);
+                engine->noteOn (1, 60, 1.0f);
+                std::vector<float> beforeNoteOff (
+                    static_cast<std::size_t> (stageCase.samplesBeforeNoteOff));
+                engine->render (beforeNoteOff.data(), stageCase.samplesBeforeNoteOff);
+                engine->noteOff (1, 60);
+                std::vector<float> release (8192);
+                engine->render (release.data(), static_cast<int> (release.size()));
+
+                expectEquals (engine->getActiveVoiceCount(), 0);
+                expect (std::all_of (release.begin(), release.end(), [] (float sample)
+                {
+                    return std::isfinite (sample);
+                }));
+            }
+        }
+
+        beginTest ("Zero-time ADSR stages have exact finite endpoint semantics");
+        {
+            auto engine = std::make_unique<SpectralSynthEngine>();
+            engine->prepare (48000.0, 0);
+            engine->setEnvelopeParameters ({ 0.0f, 0.0f, 1.0f, 0.0f });
+            const auto output = renderNote (*engine, 69, 4096, { 1, 7, 257 });
+            expectGreaterThan (peakMagnitude (output), 0.0001f);
+            expect (std::all_of (output.begin(), output.end(), [] (float sample)
+            {
+                return std::isfinite (sample);
+            }));
+
+            engine->noteOff (1, 69);
+            std::array<float, 1> afterNoteOff {};
+            engine->render (afterNoteOff.data(), 1);
+            expectEquals (engine->getActiveVoiceCount(), 0);
+            expect (std::isfinite (afterNoteOff.front()));
+        }
+
+        beginTest ("Automated envelope parameters use a deterministic 20 ms ramp");
+        {
+            auto engine = std::make_unique<SpectralSynthEngine>();
+            engine->prepare (48000.0, 257);
+            engine->setEnvelopeParameters ({ 0.0f, 0.0f, 1.0f, 0.1f });
+            engine->setEnvelopeParameterTargets ({ 0.0f, 0.0f, 0.0f, 0.1f });
+            std::array<float, 1> firstSample {};
+            engine->render (firstSample.data(), 1);
+            const auto afterOneSample = engine->getEnvelopeParameters();
+            expectGreaterThan (afterOneSample.sustainLevel, 0.0f);
+            expectLessThan (afterOneSample.sustainLevel, 1.0f);
+
+            std::array<float, 959> restOfRamp {};
+            engine->render (restOfRamp.data(), static_cast<int> (restOfRamp.size()));
+            expectWithinAbsoluteError (engine->getEnvelopeParameters().sustainLevel,
+                                       0.0f,
+                                       1.0e-6f);
+
+            engine->reset();
+            expectWithinAbsoluteError (engine->getEnvelopeParameters().sustainLevel,
+                                       0.0f,
+                                       1.0e-6f);
+        }
+
+        beginTest ("All-notes-off is channel selective and all-sound-off is global");
+        {
+            auto engine = std::make_unique<SpectralSynthEngine>();
+            engine->prepare (48000.0, 128);
+            engine->setEnvelopeParameters ({ 0.0f, 0.0f, 1.0f, 0.02f });
+            engine->noteOn (1, 60, 1.0f);
+            engine->noteOn (2, 67, 1.0f);
+            engine->allNotesOff (1);
+            std::array<float, 4096> release {};
+            engine->render (release.data(), static_cast<int> (release.size()));
+            expect (! engine->isNoteActive (1, 60));
+            expect (engine->isNoteActive (2, 67));
+
+            engine->allSoundOff (1);
+            expectEquals (engine->getActiveVoiceCount(), 0);
+        }
+
         beginTest ("Note-off releases audibly and all-sound-off is a global panic");
         {
             SpectralSynthEngine shortNoteEngine;
             shortNoteEngine.prepare (48000.0, 128);
             shortNoteEngine.noteOn (1, 60, 1.0f);
+            std::array<float, 1024> attackOutput {};
+            shortNoteEngine.render (attackOutput.data(), static_cast<int> (attackOutput.size()));
             shortNoteEngine.noteOff (1, 60);
             std::vector<float> shortRelease (8192);
             shortNoteEngine.render (shortRelease.data(), static_cast<int> (shortRelease.size()));

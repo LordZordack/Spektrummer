@@ -39,7 +39,9 @@ target_sources(Spektrummer
         src/dsp/LockFreeFft.h
         src/dsp/SynthMidiEvent.h
         src/ui/SpectrumComponent.cpp
-        src/ui/SpectrumComponent.h)
+        src/ui/SpectrumComponent.h
+        src/ui/EnvelopeComponent.cpp
+        src/ui/EnvelopeComponent.h)
 
 target_compile_features(Spektrummer PRIVATE cxx_std_20)
 
@@ -75,6 +77,7 @@ if (BUILD_TESTING)
             tests/SpectralSynthEngineTests.cpp
             tests/AnalyzerSampleFifoTests.cpp
             tests/SpectrumComponentTests.cpp
+            tests/EnvelopeComponentTests.cpp
             tests/LockFreeFftTests.cpp
             tests/SynthMidiEventTests.cpp
             src/PluginProcessor.cpp
@@ -87,7 +90,9 @@ if (BUILD_TESTING)
             src/dsp/LockFreeFft.h
             src/dsp/SynthMidiEvent.h
             src/ui/SpectrumComponent.cpp
-            src/ui/SpectrumComponent.h)
+            src/ui/SpectrumComponent.h
+            src/ui/EnvelopeComponent.cpp
+            src/ui/EnvelopeComponent.h)
 
     target_compile_features(SpektrummerTests PRIVATE cxx_std_20)
 

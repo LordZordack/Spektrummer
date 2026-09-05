@@ -29,6 +29,8 @@ void SpectralSynthEngine::prepare (double newSampleRate, int) noexcept
 {
     jassert (newSampleRate > 0.0);
     sampleRate = std::max (1.0, newSampleRate);
+    envelopeParameterRampSamples = std::max (
+        1, static_cast<int> (std::lround (sampleRate * 0.020)));
     prepareSpectralKernels();
     reset();
 }
@@ -43,12 +45,65 @@ void SpectralSynthEngine::reset() noexcept
     nextVoiceAge = 0;
     outputIndex = 0;
     samplesUntilNextFrame = 0;
+    envelopeParameters = envelopeParameterTargets;
+    envelopeParameterIncrements = { 0.0f, 0.0f, 0.0f, 0.0f };
+    envelopeParameterSamplesRemaining = 0;
 }
 
 void SpectralSynthEngine::setMaximumVoices (int requestedVoices) noexcept
 {
     maximumVoices = normaliseVoiceLimit (requestedVoices);
     enforceVoiceLimit();
+}
+
+void SpectralSynthEngine::setEnvelopeParameters (EnvelopeParameters newParameters) noexcept
+{
+    envelopeParameters = sanitiseEnvelopeParameters (newParameters);
+    envelopeParameterTargets = envelopeParameters;
+    envelopeParameterIncrements = { 0.0f, 0.0f, 0.0f, 0.0f };
+    envelopeParameterSamplesRemaining = 0;
+}
+
+void SpectralSynthEngine::setEnvelopeParameterTargets (EnvelopeParameters newParameters) noexcept
+{
+    const auto targets = sanitiseEnvelopeParameters (newParameters);
+
+    if (targets.attackSeconds == envelopeParameterTargets.attackSeconds
+        && targets.decaySeconds == envelopeParameterTargets.decaySeconds
+        && targets.sustainLevel == envelopeParameterTargets.sustainLevel
+        && targets.releaseSeconds == envelopeParameterTargets.releaseSeconds)
+        return;
+
+    envelopeParameterTargets = targets;
+    const auto samples = static_cast<float> (envelopeParameterRampSamples);
+    envelopeParameterIncrements = {
+        (targets.attackSeconds - envelopeParameters.attackSeconds) / samples,
+        (targets.decaySeconds - envelopeParameters.decaySeconds) / samples,
+        (targets.sustainLevel - envelopeParameters.sustainLevel) / samples,
+        (targets.releaseSeconds - envelopeParameters.releaseSeconds) / samples
+    };
+    envelopeParameterSamplesRemaining = envelopeParameterRampSamples;
+}
+
+SpectralSynthEngine::EnvelopeParameters SpectralSynthEngine::getEnvelopeParameters() const noexcept
+{
+    return envelopeParameters;
+}
+
+SpectralSynthEngine::EnvelopeParameters SpectralSynthEngine::sanitiseEnvelopeParameters (
+    EnvelopeParameters newParameters) noexcept
+{
+    const auto finiteOr = [] (float value, float fallback) noexcept
+    {
+        return std::isfinite (value) ? value : fallback;
+    };
+
+    return {
+        juce::jlimit (0.0f, 5.0f, finiteOr (newParameters.attackSeconds, 0.010f)),
+        juce::jlimit (0.0f, 5.0f, finiteOr (newParameters.decaySeconds, 0.100f)),
+        juce::jlimit (0.0f, 1.0f, finiteOr (newParameters.sustainLevel, 0.800f)),
+        juce::jlimit (0.0f, 10.0f, finiteOr (newParameters.releaseSeconds, 0.080f))
+    };
 }
 
 int SpectralSynthEngine::getMaximumVoices() const noexcept
@@ -91,9 +146,9 @@ void SpectralSynthEngine::noteOn (int midiChannel, int midiNote, float velocity)
     voice->channel = midiChannel;
     voice->note = juce::jlimit (0, 127, midiNote);
     voice->velocity = juce::jlimit (0.0f, 1.0f, velocity);
-    voice->envelope = 1.0f;
+    voice->envelope = 0.0f;
     voice->age = ++nextVoiceAge;
-    voice->stage = EnvelopeStage::sustain;
+    voice->stage = EnvelopeStage::attack;
 }
 
 void SpectralSynthEngine::noteOff (int midiChannel, int midiNote) noexcept
@@ -102,7 +157,14 @@ void SpectralSynthEngine::noteOff (int midiChannel, int midiNote) noexcept
         if (voice.stage != EnvelopeStage::inactive
             && voice.channel == midiChannel
             && voice.note == midiNote)
-            voice.stage = EnvelopeStage::release;
+        {
+            if (voice.stage != EnvelopeStage::release)
+            {
+                voice.releaseStartEnvelope = voice.envelope;
+                voice.stageElapsedSeconds = 0.0;
+                voice.stage = EnvelopeStage::release;
+            }
+        }
 }
 
 void SpectralSynthEngine::allNotesOff (int midiChannel) noexcept
@@ -110,7 +172,14 @@ void SpectralSynthEngine::allNotesOff (int midiChannel) noexcept
     for (auto& voice : voices)
         if (voice.stage != EnvelopeStage::inactive
             && (midiChannel == 0 || voice.channel == midiChannel))
-            voice.stage = EnvelopeStage::release;
+        {
+            if (voice.stage != EnvelopeStage::release)
+            {
+                voice.releaseStartEnvelope = voice.envelope;
+                voice.stageElapsedSeconds = 0.0;
+                voice.stage = EnvelopeStage::release;
+            }
+        }
 }
 
 void SpectralSynthEngine::allSoundOff (int) noexcept
@@ -138,6 +207,12 @@ void SpectralSynthEngine::render (float* output, int numSamples) noexcept
         nextOutput = 0.0f;
         outputIndex = (outputIndex + 1) % fftSize;
         --samplesUntilNextFrame;
+
+        advanceEnvelopeParameters();
+
+        for (auto& voice : voices)
+            if (voice.stage != EnvelopeStage::inactive)
+                advanceEnvelope (voice);
     }
 }
 
@@ -218,13 +293,80 @@ void SpectralSynthEngine::enforceVoiceLimit() noexcept
 
 void SpectralSynthEngine::advanceEnvelope (Voice& voice) noexcept
 {
-    if (voice.stage == EnvelopeStage::release)
-    {
-        voice.envelope -= static_cast<float> (static_cast<double> (hopSize)
-                                               / (SpectralSynthEngine::releaseSeconds * sampleRate));
+    auto remainingSeconds = 1.0 / sampleRate;
 
-        if (voice.envelope <= 0.0f)
-            voice = {};
+    while (remainingSeconds > 0.0 && voice.stage != EnvelopeStage::inactive)
+    {
+        const auto advanceTimedStage = [&] (double durationSeconds,
+                                            float startLevel,
+                                            float endLevel) noexcept
+        {
+            if (durationSeconds <= 0.0)
+            {
+                voice.envelope = endLevel;
+                return true;
+            }
+
+            const auto available = std::max (0.0, durationSeconds - voice.stageElapsedSeconds);
+            const auto elapsed = std::min (remainingSeconds, available);
+            voice.stageElapsedSeconds += elapsed;
+            remainingSeconds -= elapsed;
+            const auto proportion = static_cast<float> (
+                juce::jlimit (0.0, 1.0, voice.stageElapsedSeconds / durationSeconds));
+            voice.envelope = startLevel + (endLevel - startLevel) * proportion;
+            return voice.stageElapsedSeconds >= durationSeconds;
+        };
+
+        switch (voice.stage)
+        {
+            case EnvelopeStage::attack:
+                if (advanceTimedStage (envelopeParameters.attackSeconds, 0.0f, 1.0f))
+                {
+                    voice.stage = EnvelopeStage::decay;
+                    voice.stageElapsedSeconds = 0.0;
+                }
+                break;
+            case EnvelopeStage::decay:
+                if (advanceTimedStage (envelopeParameters.decaySeconds,
+                                       1.0f,
+                                       envelopeParameters.sustainLevel))
+                {
+                    voice.stage = EnvelopeStage::sustain;
+                    voice.stageElapsedSeconds = 0.0;
+                }
+                break;
+            case EnvelopeStage::sustain:
+                voice.envelope = envelopeParameters.sustainLevel;
+                remainingSeconds = 0.0;
+                break;
+            case EnvelopeStage::release:
+                if (advanceTimedStage (envelopeParameters.releaseSeconds,
+                                       voice.releaseStartEnvelope,
+                                       0.0f))
+                    voice = {};
+                break;
+            case EnvelopeStage::inactive:
+                remainingSeconds = 0.0;
+                break;
+        }
+    }
+}
+
+void SpectralSynthEngine::advanceEnvelopeParameters() noexcept
+{
+    if (envelopeParameterSamplesRemaining <= 0)
+        return;
+
+    envelopeParameters.attackSeconds += envelopeParameterIncrements.attackSeconds;
+    envelopeParameters.decaySeconds += envelopeParameterIncrements.decaySeconds;
+    envelopeParameters.sustainLevel += envelopeParameterIncrements.sustainLevel;
+    envelopeParameters.releaseSeconds += envelopeParameterIncrements.releaseSeconds;
+    --envelopeParameterSamplesRemaining;
+
+    if (envelopeParameterSamplesRemaining == 0)
+    {
+        envelopeParameters = envelopeParameterTargets;
+        envelopeParameterIncrements = { 0.0f, 0.0f, 0.0f, 0.0f };
     }
 }
 
@@ -322,11 +464,6 @@ void SpectralSynthEngine::generateFrame() noexcept
 
     for (auto& voice : voices)
     {
-        if (voice.stage == EnvelopeStage::inactive)
-            continue;
-
-        advanceEnvelope (voice);
-
         if (voice.stage == EnvelopeStage::inactive)
             continue;
 

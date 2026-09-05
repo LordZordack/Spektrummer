@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter();
@@ -168,18 +169,12 @@ void expectFiniteOutputForBlockSize (juce::UnitTest& test, int channels, int sam
 
     processor->processBlock (buffer, midi);
 
-    auto peak = 0.0f;
-
     for (auto channel = 0; channel < channels; ++channel)
         for (auto sample = 0; sample < samples; ++sample)
         {
             const auto value = buffer.getSample (channel, sample);
             test.expect (std::isfinite (value));
-            peak = std::max (peak, std::abs (value));
         }
-
-    if (samples > 1)
-        test.expectGreaterThan (peak, 0.0f);
 
     processor->releaseResources();
 }
@@ -243,11 +238,16 @@ public:
             if (editor != nullptr)
             {
                 expect (editor->getAudioProcessor() == processor.get());
-                expectEquals (editor->getWidth(), 640);
-                expectEquals (editor->getHeight(), 420);
+                expectEquals (editor->getWidth(), 900);
+                expectEquals (editor->getHeight(), 560);
                 expect (editor->findChildWithID ("outputLevel") != nullptr);
                 expect (editor->findChildWithID ("maxVoices") != nullptr);
                 expect (editor->findChildWithID ("spectrum") != nullptr);
+                expect (editor->findChildWithID ("attack") != nullptr);
+                expect (editor->findChildWithID ("decay") != nullptr);
+                expect (editor->findChildWithID ("sustain") != nullptr);
+                expect (editor->findChildWithID ("release") != nullptr);
+                expect (editor->findChildWithID ("envelopePreview") != nullptr);
             }
         }
 
@@ -298,6 +298,39 @@ public:
             {
                 expect (false, "maxVoices must be an AudioParameterChoice");
             }
+        }
+
+        beginTest ("ADSR parameters have stable finite contracts");
+        {
+            auto processor = makeProcessor();
+            const auto expectFloatParameter = [&] (const char* id,
+                                                   float minimum,
+                                                   float maximum,
+                                                   float defaultValue)
+            {
+                auto* parameter = findParameter (*processor, id);
+                expect (parameter != nullptr);
+
+                if (parameter != nullptr)
+                {
+                    expectWithinAbsoluteError (parameter->getNormalisableRange().start,
+                                               minimum,
+                                               0.001f);
+                    expectWithinAbsoluteError (parameter->getNormalisableRange().end,
+                                               maximum,
+                                               0.001f);
+                    expectWithinAbsoluteError (parameter->convertFrom0to1 (
+                                                   parameter->getDefaultValue()),
+                                               defaultValue,
+                                               0.001f);
+                    expect (std::isfinite (parameter->getDefaultValue()));
+                }
+            };
+
+            expectFloatParameter ("attack", 0.0f, 5.0f, 0.01f);
+            expectFloatParameter ("decay", 0.0f, 5.0f, 0.10f);
+            expectFloatParameter ("sustain", 0.0f, 1.0f, 0.80f);
+            expectFloatParameter ("release", 0.0f, 10.0f, 0.08f);
         }
 
         beginTest ("Output-level endpoints are exact mute and finite full level");
@@ -434,6 +467,10 @@ public:
             auto processor = makeProcessor();
             setParameterValue (*processor, "outputLevel", -6.0f);
             setParameterValue (*processor, "maxVoices", 3.0f);
+            setParameterValue (*processor, "attack", 0.25f);
+            setParameterValue (*processor, "decay", 0.35f);
+            setParameterValue (*processor, "sustain", 0.45f);
+            setParameterValue (*processor, "release", 1.25f);
             juce::MemoryBlock state;
             processor->getStateInformation (state);
             expectGreaterThan (static_cast<int> (state.getSize()), 0);
@@ -442,8 +479,16 @@ public:
             restored->setStateInformation (state.getData(), static_cast<int> (state.getSize()));
             auto* restoredOutput = findParameter (*restored, "outputLevel");
             auto* restoredVoices = findParameter (*restored, "maxVoices");
+            auto* restoredAttack = findParameter (*restored, "attack");
+            auto* restoredDecay = findParameter (*restored, "decay");
+            auto* restoredSustain = findParameter (*restored, "sustain");
+            auto* restoredRelease = findParameter (*restored, "release");
             expect (restoredOutput != nullptr);
             expect (restoredVoices != nullptr);
+            expect (restoredAttack != nullptr);
+            expect (restoredDecay != nullptr);
+            expect (restoredSustain != nullptr);
+            expect (restoredRelease != nullptr);
 
             if (restoredOutput != nullptr)
                 expectWithinAbsoluteError (restoredOutput->convertFrom0to1 (restoredOutput->getValue()),
@@ -453,6 +498,26 @@ public:
             if (restoredVoices != nullptr)
                 expectWithinAbsoluteError (restoredVoices->convertFrom0to1 (restoredVoices->getValue()),
                                            3.0f,
+                                           0.001f);
+
+            if (restoredAttack != nullptr)
+                expectWithinAbsoluteError (restoredAttack->convertFrom0to1 (restoredAttack->getValue()),
+                                           0.25f,
+                                           0.001f);
+
+            if (restoredDecay != nullptr)
+                expectWithinAbsoluteError (restoredDecay->convertFrom0to1 (restoredDecay->getValue()),
+                                           0.35f,
+                                           0.001f);
+
+            if (restoredSustain != nullptr)
+                expectWithinAbsoluteError (restoredSustain->convertFrom0to1 (restoredSustain->getValue()),
+                                           0.45f,
+                                           0.001f);
+
+            if (restoredRelease != nullptr)
+                expectWithinAbsoluteError (restoredRelease->convertFrom0to1 (restoredRelease->getValue()),
+                                           1.25f,
                                            0.001f);
 
             processor->setStateInformation (nullptr, 0);
@@ -484,16 +549,31 @@ public:
 
                     processor->setStateInformation (malformedState.getData(),
                                                     static_cast<int> (malformedState.getSize()));
-                    if (auto* output = findParameter (*processor, "outputLevel"))
-                        expectWithinAbsoluteError (output->convertFrom0to1 (output->getValue()),
-                                                   -6.0f,
-                                                   0.001f);
+                    for (const auto& expected : std::array {
+                             std::pair { "outputLevel", -6.0f },
+                             std::pair { "maxVoices", 3.0f },
+                             std::pair { "attack", 0.25f },
+                             std::pair { "decay", 0.35f },
+                             std::pair { "sustain", 0.45f },
+                             std::pair { "release", 1.25f } })
+                    {
+                        if (auto* parameter = findParameter (*processor, expected.first))
+                            expectWithinAbsoluteError (parameter->convertFrom0to1 (
+                                                           parameter->getValue()),
+                                                       expected.second,
+                                                       0.001f);
+                    }
                 };
 
                 auto nonFinite = juce::ValueTree::fromXml (*validXml);
                 nonFinite.getChildWithProperty ("id", "outputLevel")
                          .setProperty ("value", std::numeric_limits<double>::quiet_NaN(), nullptr);
                 expectRejected (nonFinite);
+
+                auto nonFiniteAttack = juce::ValueTree::fromXml (*validXml);
+                nonFiniteAttack.getChildWithProperty ("id", "attack")
+                               .setProperty ("value", std::numeric_limits<double>::infinity(), nullptr);
+                expectRejected (nonFiniteAttack);
 
                 auto missing = juce::ValueTree::fromXml (*validXml);
                 missing.removeChild (missing.getChildWithProperty ("id", "maxVoices"), nullptr);
@@ -508,6 +588,11 @@ public:
                 outOfRange.getChildWithProperty ("id", "outputLevel")
                           .setProperty ("value", 12.0, nullptr);
                 expectRejected (outOfRange);
+
+                auto invalidSustain = juce::ValueTree::fromXml (*validXml);
+                invalidSustain.getChildWithProperty ("id", "sustain")
+                              .setProperty ("value", 2.0, nullptr);
+                expectRejected (invalidSustain);
 
                 juce::AudioBuffer<float> finiteBuffer (1, 4096);
                 juce::MidiBuffer finiteMidi;
