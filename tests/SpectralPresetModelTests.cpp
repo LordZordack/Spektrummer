@@ -648,11 +648,11 @@ private:
         expectHarmonicLevelFieldFailures (
             -96.0, 24.0, 2,
             [] (HarmonicGenerator& value, double scalar) { value.evenOffsetDb = scalar; });
-
-        beginTest ("Harmonic level rejects invalid non-level generator input");
-        invalid = generator;
-        invalid.inharmonicStretchB = quietNaN;
-        expectNumericFailure (harmonicLevelDb (1, invalid), ModelErrorCode::nonFiniteValue);
+        expectHarmonicLevelFieldFailures (
+            0.0, 0.01, 1,
+            [] (HarmonicGenerator& value, double scalar) {
+                value.inharmonicStretchB = scalar;
+            });
     }
 
     template <typename Setter>
@@ -712,16 +712,8 @@ private:
         expectFailure (draftWithSource (malformed), ModelErrorCode::expressionCompileFailed,
                        ModelField::levelExpression, 0, noIndex, noIndex,
                        ExpressionErrorCode::expectedExpression, 3);
-        malformed = validFormulaGenerator();
-        malformed.frequencyExpression = "frequency_hz";
-        expectFailure (draftWithSource (malformed), ModelErrorCode::expressionCompileFailed,
-                       ModelField::frequencyExpression, 0, noIndex, noIndex,
-                       ExpressionErrorCode::unknownIdentifier, 0);
-        malformed = validFormulaGenerator();
-        malformed.levelExpression = "frequency_hz";
-        expectFailure (draftWithSource (malformed), ModelErrorCode::expressionCompileFailed,
-                       ModelField::levelExpression, 0, noIndex, noIndex,
-                       ExpressionErrorCode::unknownIdentifier, 0);
+
+        testFormulaTransferVariableRejection();
 
         beginTest ("Formula mode rejects invalid underlying enum values");
         auto invalidMode = validFormulaGenerator();
@@ -731,6 +723,29 @@ private:
 
         testFormulaResultBoundaries();
         testFormulaEvaluationFailures();
+    }
+
+    void testFormulaTransferVariableRejection()
+    {
+        beginTest ("Both formula modes reject every transfer variable in both expressions");
+        for (const auto mode : std::array { FormulaFrequencyMode::trackedRatio,
+                                           FormulaFrequencyMode::fixedHz })
+            for (const auto* variable : std::array { "frequency_hz", "nyquist_hz" })
+            {
+                auto formula = validFormulaGenerator (mode);
+                formula.frequencyExpression = variable;
+                expectFailure (draftWithSource (formula),
+                               ModelErrorCode::expressionCompileFailed,
+                               ModelField::frequencyExpression, 0, noIndex, noIndex,
+                               ExpressionErrorCode::unknownIdentifier, 0);
+
+                formula = validFormulaGenerator (mode);
+                formula.levelExpression = variable;
+                expectFailure (draftWithSource (formula),
+                               ModelErrorCode::expressionCompileFailed,
+                               ModelField::levelExpression, 0, noIndex, noIndex,
+                               ExpressionErrorCode::unknownIdentifier, 0);
+            }
     }
 
     void testFormulaResultBoundaries()
