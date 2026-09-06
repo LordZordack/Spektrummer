@@ -18,33 +18,51 @@ void recordAllocation() noexcept
         ++observedAllocations;
 }
 
-[[nodiscard]] void* allocate (std::size_t size)
+void handleAllocationFailure()
 {
-    if (auto* memory = std::malloc (size == 0 ? 1 : size))
+    if (const auto handler = std::get_new_handler())
     {
-        recordAllocation();
-        return memory;
+        handler();
+        return;
     }
 
     throw std::bad_alloc {};
 }
 
+[[nodiscard]] void* allocate (std::size_t size)
+{
+    for (;;)
+    {
+        if (auto* memory = std::malloc (size == 0 ? 1 : size))
+        {
+            recordAllocation();
+            return memory;
+        }
+
+        handleAllocationFailure();
+    }
+}
+
 [[nodiscard]] void* allocateAligned (std::size_t size, std::size_t alignment)
 {
+    for (;;)
+    {
 #if defined (_MSC_VER)
-    auto* memory = _aligned_malloc (size == 0 ? 1 : size, alignment);
+        auto* memory = _aligned_malloc (size == 0 ? 1 : size, alignment);
 #else
-    const auto adjustedSize = ((size == 0 ? 1 : size) + alignment - 1) / alignment * alignment;
-    auto* memory = std::aligned_alloc (alignment, adjustedSize);
+        const auto adjustedSize = ((size == 0 ? 1 : size) + alignment - 1)
+                                / alignment * alignment;
+        auto* memory = std::aligned_alloc (alignment, adjustedSize);
 #endif
 
-    if (memory != nullptr)
-    {
-        recordAllocation();
-        return memory;
-    }
+        if (memory != nullptr)
+        {
+            recordAllocation();
+            return memory;
+        }
 
-    throw std::bad_alloc {};
+        handleAllocationFailure();
+    }
 }
 
 void freeAligned (void* memory) noexcept

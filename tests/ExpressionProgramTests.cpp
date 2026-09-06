@@ -222,18 +222,19 @@ private:
     void testVariableSets()
     {
         beginTest ("Source expressions expose only source variables");
-        expectEvaluation ("index + fundamental_hz + nyquist_hz",
-                          24113.0,
-                          ExpressionVariableSet::source,
-                          sourceContext);
+        expectEvaluation ("index", 3.0, ExpressionVariableSet::source, sourceContext);
+        expectEvaluation ("fundamental_hz", 110.0,
+                          ExpressionVariableSet::source, sourceContext);
+        expectEvaluation ("nyquist_hz", 24000.0,
+                          ExpressionVariableSet::source, sourceContext);
         expectCompileFailure ("frequency_hz", ExpressionVariableSet::source,
                               ExpressionErrorCode::unknownIdentifier, 0);
 
         beginTest ("Transfer expressions expose only transfer variables");
-        expectEvaluation ("frequency_hz + nyquist_hz",
-                          24880.0,
-                          ExpressionVariableSet::transfer,
-                          transferContext);
+        expectEvaluation ("frequency_hz", 880.0,
+                          ExpressionVariableSet::transfer, transferContext);
+        expectEvaluation ("nyquist_hz", 24000.0,
+                          ExpressionVariableSet::transfer, transferContext);
         expectCompileFailure ("index", ExpressionVariableSet::transfer,
                               ExpressionErrorCode::unknownIdentifier, 0);
         expectCompileFailure ("fundamental_hz", ExpressionVariableSet::transfer,
