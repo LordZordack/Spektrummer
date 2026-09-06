@@ -35,6 +35,8 @@ target_sources(Spektrummer
         src/PluginEditor.h
         src/model/ExpressionProgram.cpp
         src/model/ExpressionProgram.h
+        src/model/SpectralPresetModel.cpp
+        src/model/SpectralPresetModel.h
         src/analyzer/AnalyzerSampleFifo.h
         src/dsp/SpectralSynthEngine.cpp
         src/dsp/SpectralSynthEngine.h
@@ -92,6 +94,8 @@ if (BUILD_TESTING)
             src/PluginEditor.h
             src/model/ExpressionProgram.cpp
             src/model/ExpressionProgram.h
+            src/model/SpectralPresetModel.cpp
+            src/model/SpectralPresetModel.h
             src/analyzer/AnalyzerSampleFifo.h
             src/dsp/SpectralSynthEngine.cpp
             src/dsp/SpectralSynthEngine.h
