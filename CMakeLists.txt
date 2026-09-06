@@ -76,6 +76,7 @@ if (BUILD_TESTING)
     target_sources(SpektrummerTests
         PRIVATE
             tests/ExpressionProgramTests.cpp
+            tests/SpectralPresetModelTests.cpp
             tests/TestAllocationCounter.cpp
             tests/TestAllocationCounter.h
             tests/PluginShellTests.cpp
