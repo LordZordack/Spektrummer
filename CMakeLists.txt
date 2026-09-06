@@ -73,6 +73,9 @@ if (BUILD_TESTING)
 
     target_sources(SpektrummerTests
         PRIVATE
+            tests/ExpressionProgramTests.cpp
+            tests/TestAllocationCounter.cpp
+            tests/TestAllocationCounter.h
             tests/PluginShellTests.cpp
             tests/SpectralSynthEngineTests.cpp
             tests/AnalyzerSampleFifoTests.cpp
