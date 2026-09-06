@@ -713,7 +713,8 @@ private:
                        ModelField::levelExpression, 0, noIndex, noIndex,
                        ExpressionErrorCode::expectedExpression, 3);
 
-        testFormulaTransferVariableRejection();
+        testFormulaFrequencyVariableRejection();
+        testFormulaSourceVariableBindings();
 
         beginTest ("Formula mode rejects invalid underlying enum values");
         auto invalidMode = validFormulaGenerator();
@@ -725,27 +726,98 @@ private:
         testFormulaEvaluationFailures();
     }
 
-    void testFormulaTransferVariableRejection()
+    void testFormulaFrequencyVariableRejection()
     {
-        beginTest ("Both formula modes reject every transfer variable in both expressions");
+        beginTest ("Both formula modes reject frequency_hz in both expressions");
         for (const auto mode : std::array { FormulaFrequencyMode::trackedRatio,
                                            FormulaFrequencyMode::fixedHz })
-            for (const auto* variable : std::array { "frequency_hz", "nyquist_hz" })
-            {
-                auto formula = validFormulaGenerator (mode);
-                formula.frequencyExpression = variable;
-                expectFailure (draftWithSource (formula),
-                               ModelErrorCode::expressionCompileFailed,
-                               ModelField::frequencyExpression, 0, noIndex, noIndex,
-                               ExpressionErrorCode::unknownIdentifier, 0);
+        {
+            auto formula = validFormulaGenerator (mode);
+            formula.frequencyExpression = "frequency_hz";
+            expectFailure (draftWithSource (formula),
+                           ModelErrorCode::expressionCompileFailed,
+                           ModelField::frequencyExpression, 0, noIndex, noIndex,
+                           ExpressionErrorCode::unknownIdentifier, 0);
 
-                formula = validFormulaGenerator (mode);
-                formula.levelExpression = variable;
-                expectFailure (draftWithSource (formula),
-                               ModelErrorCode::expressionCompileFailed,
-                               ModelField::levelExpression, 0, noIndex, noIndex,
-                               ExpressionErrorCode::unknownIdentifier, 0);
-            }
+            formula = validFormulaGenerator (mode);
+            formula.levelExpression = "frequency_hz";
+            expectFailure (draftWithSource (formula),
+                           ModelErrorCode::expressionCompileFailed,
+                           ModelField::levelExpression, 0, noIndex, noIndex,
+                           ExpressionErrorCode::unknownIdentifier, 0);
+        }
+    }
+
+    void testFormulaSourceVariableBindings()
+    {
+        beginTest ("Tracked-ratio formulas bind all source variables distinctly");
+        constexpr ExpressionContext trackedContext {
+            .index = 7.0,
+            .fundamentalHz = 131.0,
+            .frequencyHz = 17000.0,
+            .nyquistHz = 30000.0
+        };
+        expectFormulaSourceBindings (
+            FormulaFrequencyMode::trackedRatio, trackedContext,
+            "index * 5 + fundamental_hz / 131 + nyquist_hz / 10000", 39.0,
+            trackedRatioRange,
+            "-96 + index * 2 + fundamental_hz / 131 + nyquist_hz / 10000", -78.0);
+
+        beginTest ("Fixed-Hz formulas bind all source variables distinctly");
+        constexpr ExpressionContext fixedContext {
+            .index = 11.0,
+            .fundamentalHz = 173.0,
+            .frequencyHz = 19000.0,
+            .nyquistHz = 32768.0
+        };
+        expectFormulaSourceBindings (
+            FormulaFrequencyMode::fixedHz, fixedContext,
+            "index * 1000 + fundamental_hz * 10 + nyquist_hz / 8", 16826.0,
+            fixedFrequencyRange,
+            "-96 + index + fundamental_hz / 173 + nyquist_hz / 8192", -80.0);
+    }
+
+    void expectFormulaSourceBindings (FormulaFrequencyMode mode,
+                                      const ExpressionContext& context,
+                                      std::string frequencyExpression,
+                                      double expectedFrequency,
+                                      ExpressionResultRange frequencyRange,
+                                      std::string levelExpression,
+                                      double expectedLevel)
+    {
+        auto formula = validFormulaGenerator (mode);
+        formula.frequencyExpression = std::move (frequencyExpression);
+        formula.levelExpression = std::move (levelExpression);
+
+        const auto result = validatePreset (draftWithSource (formula));
+        expect (result.preset.has_value());
+        expect (result.error.code == ModelErrorCode::none);
+        expect (result.error.field == ModelField::none);
+        expectEquals (result.error.sourceIndex, noIndex);
+        expectEquals (result.error.layerIndex, noIndex);
+        expectEquals (result.error.pointIndex, noIndex);
+        expect (result.error.expressionError.code == ExpressionErrorCode::none);
+        expectEquals (result.error.expressionError.offset, std::size_t {});
+        if (! result.preset)
+            return;
+
+        const auto sources = result.preset->sources();
+        expectEquals (sources.size(), std::size_t { 1 });
+        if (sources.size() != 1)
+            return;
+
+        const auto* validated = std::get_if<ValidatedFormulaGenerator> (
+            &sources[0]);
+        expect (validated != nullptr);
+        if (validated == nullptr)
+            return;
+
+        expect (validated->mode == mode);
+        expectEvaluationSuccess (
+            validated->frequencyProgram.evaluate (context, frequencyRange),
+            expectedFrequency);
+        expectEvaluationSuccess (
+            validated->levelProgram.evaluate (context, sourceLevelRange), expectedLevel);
     }
 
     void testFormulaResultBoundaries()
