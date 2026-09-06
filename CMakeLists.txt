@@ -33,6 +33,10 @@ target_sources(Spektrummer
         src/PluginProcessor.h
         src/PluginEditor.cpp
         src/PluginEditor.h
+        src/model/ExpressionProgram.cpp
+        src/model/ExpressionProgram.h
+        src/model/SpectralPresetModel.cpp
+        src/model/SpectralPresetModel.h
         src/analyzer/AnalyzerSampleFifo.h
         src/dsp/SpectralSynthEngine.cpp
         src/dsp/SpectralSynthEngine.h
@@ -73,6 +77,10 @@ if (BUILD_TESTING)
 
     target_sources(SpektrummerTests
         PRIVATE
+            tests/ExpressionProgramTests.cpp
+            tests/SpectralPresetModelTests.cpp
+            tests/TestAllocationCounter.cpp
+            tests/TestAllocationCounter.h
             tests/PluginShellTests.cpp
             tests/SpectralSynthEngineTests.cpp
             tests/AnalyzerSampleFifoTests.cpp
@@ -84,6 +92,10 @@ if (BUILD_TESTING)
             src/PluginProcessor.h
             src/PluginEditor.cpp
             src/PluginEditor.h
+            src/model/ExpressionProgram.cpp
+            src/model/ExpressionProgram.h
+            src/model/SpectralPresetModel.cpp
+            src/model/SpectralPresetModel.h
             src/analyzer/AnalyzerSampleFifo.h
             src/dsp/SpectralSynthEngine.cpp
             src/dsp/SpectralSynthEngine.h

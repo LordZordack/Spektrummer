@@ -10,6 +10,7 @@ reference for Spektrummer.
 ## Product and architecture
 
 - [Architecture](architecture.md) - Major components, ownership boundaries, and repository invariants.
+- [Bounded spectral preset model](spectral-preset-model.md) - Editable spectral definitions, fixed-capacity validation, and restricted expressions.
 - [Spectral signal flow](signal-flow.md) - MIDI-to-audio processing through inverse FFT overlap-add and analysis.
 - [Voices and ADSR envelopes](voices-and-envelopes.md) - Voice allocation, lifecycle, envelope timing, and reset semantics.
 - [Parameters and state](parameters.md) - Stable APVTS contracts, ranges, defaults, automation, and restoration.
