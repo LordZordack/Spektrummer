@@ -19,6 +19,7 @@ enum class ExpressionErrorCode
     emptyExpression,
     expressionTooLong,
     tooManyNodes,
+    nestingTooDeep,
     expectedExpression,
     trailingToken,
     unknownIdentifier,

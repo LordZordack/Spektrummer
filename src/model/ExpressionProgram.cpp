@@ -19,6 +19,7 @@ constexpr std::size_t maximumSourceLength = 512;
         case ExpressionErrorCode::emptyExpression: return "expression is empty";
         case ExpressionErrorCode::expressionTooLong: return "expression is too long";
         case ExpressionErrorCode::tooManyNodes: return "expression has too many nodes";
+        case ExpressionErrorCode::nestingTooDeep: return "expression nesting is too deep";
         case ExpressionErrorCode::expectedExpression: return "expected expression";
         case ExpressionErrorCode::trailingToken: return "unexpected trailing token";
         case ExpressionErrorCode::unknownIdentifier: return "unknown identifier";
@@ -76,6 +77,12 @@ constexpr std::size_t maximumSourceLength = 512;
 {
     return isIdentifierStart (character) || isAsciiDigit (character);
 }
+
+[[nodiscard]] constexpr bool isUnsupportedSyntaxToken (char character) noexcept
+{
+    return character == '=' || character == '?' || character == ':'
+        || character == '&' || character == '|';
+}
 }
 
 class ExpressionProgram::Compiler final
@@ -108,8 +115,7 @@ public:
         if (position != source.size())
         {
             const auto character = source[position];
-            fail (character == '=' || character == '?' || character == ':'
-                      || character == '&' || character == '|'
+            fail (isUnsupportedSyntaxToken (character)
                       ? ExpressionErrorCode::unsupportedSyntax
                       : ExpressionErrorCode::trailingToken,
                   position);
@@ -126,6 +132,8 @@ public:
     }
 
 private:
+    static constexpr std::size_t maximumNestingDepth = 128;
+
     struct FunctionDescription
     {
         NodeKind kind = NodeKind::functionAbs;
@@ -388,14 +396,32 @@ private:
         if (isIdentifierStart (source[position]))
             return parseIdentifier();
 
-        if (consume ("("))
+        if (source[position] == '(')
         {
+            const auto openingOffset = position;
+
+            if (nestingDepth >= maximumNestingDepth)
+            {
+                fail (ExpressionErrorCode::nestingTooDeep, openingOffset);
+                return invalidNode;
+            }
+
+            ++position;
+            ++nestingDepth;
             const auto expression = parseLogicalOr();
+            --nestingDepth;
+
+            if (error.code != ExpressionErrorCode::none)
+                return invalidNode;
+
             skipWhitespace();
 
             if (! consume (")"))
             {
-                fail (ExpressionErrorCode::expectedExpression, position);
+                fail (position < source.size() && isUnsupportedSyntaxToken (source[position])
+                          ? ExpressionErrorCode::unsupportedSyntax
+                          : ExpressionErrorCode::expectedExpression,
+                      position);
                 return invalidNode;
             }
 
@@ -585,6 +611,7 @@ private:
     ExpressionVariableSet variableSet;
     ExpressionProgram& program;
     std::size_t position = 0;
+    std::size_t nestingDepth = 0;
     ExpressionError error {};
 };
 

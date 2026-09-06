@@ -297,6 +297,14 @@ private:
                               ExpressionErrorCode::unsupportedSyntax, 6);
         expectCompileFailure ("1 ? 2 : 3", ExpressionVariableSet::source,
                               ExpressionErrorCode::unsupportedSyntax, 2);
+        expectCompileFailure ("(index = 1)", ExpressionVariableSet::source,
+                              ExpressionErrorCode::unsupportedSyntax, 7);
+        expectCompileFailure ("(1 ? 2 : 3)", ExpressionVariableSet::source,
+                              ExpressionErrorCode::unsupportedSyntax, 3);
+        expectCompileFailure ("(1 & 2)", ExpressionVariableSet::source,
+                              ExpressionErrorCode::unsupportedSyntax, 3);
+        expectCompileFailure ("(1 | 2)", ExpressionVariableSet::source,
+                              ExpressionErrorCode::unsupportedSyntax, 3);
 
         beginTest ("The source length limit accepts 512 and rejects 513 characters");
         const std::string maximumLengthExpression (512, ' ');
@@ -317,6 +325,16 @@ private:
         const std::string excessiveNodeExpression = std::string (128, '-') + "1";
         expectCompileFailure (excessiveNodeExpression, ExpressionVariableSet::source,
                               ExpressionErrorCode::tooManyNodes, 128);
+
+        beginTest ("The nesting limit accepts 128 and rejects 129 parenthesis groups");
+        const std::string maximumNestingExpression = std::string (128, '(') + "1"
+                                                   + std::string (128, ')');
+        expect (ExpressionProgram::compile (maximumNestingExpression,
+                                            ExpressionVariableSet::source).success);
+        const std::string excessiveNestingExpression = std::string (129, '(') + "1"
+                                                     + std::string (129, ')');
+        expectCompileFailure (excessiveNestingExpression, ExpressionVariableSet::source,
+                              ExpressionErrorCode::nestingTooDeep, 128);
     }
 
     void testFunctionArities()
