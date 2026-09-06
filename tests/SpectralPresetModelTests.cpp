@@ -120,7 +120,12 @@ static_assert (std::is_same_v<decltype (std::declval<SpectralPresetValidationRes
                               std::optional<ValidatedSpectralPreset>>);
 static_assert (std::is_same_v<decltype (std::declval<SpectralPresetValidationResult>().error),
                               SpectralModelError>);
+
+template <typename Type>
+concept ConstructibleFromEmptyBraces = requires { Type { {} }; };
+
 static_assert (! std::is_default_constructible_v<ValidatedSpectralPreset>);
+static_assert (! ConstructibleFromEmptyBraces<ValidatedSpectralPreset>);
 static_assert (std::is_copy_constructible_v<ValidatedSpectralPreset>);
 static_assert (std::is_copy_assignable_v<ValidatedSpectralPreset>);
 static_assert (std::is_same_v<decltype (std::declval<const ValidatedSpectralPreset&>().sources()),

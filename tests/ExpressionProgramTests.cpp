@@ -149,11 +149,21 @@ private:
         if (! compiled.success)
             return;
 
-        const auto observation = observeEvaluation (compiled.program, sourceContext, range);
-        expect (! observation.result.success, std::string { expression });
-        expect (observation.result.error.code == code, std::string { expression });
-        expectEquals (observation.result.error.offset, offset, std::string { expression });
-        expectEquals (observation.allocations, std::size_t {}, std::string { expression });
+        expectEvaluationFailure (compiled.program, sourceContext, code, offset, range, expression);
+    }
+
+    void expectEvaluationFailure (const ExpressionProgram& program,
+                                  const ExpressionContext& context,
+                                  ExpressionErrorCode code,
+                                  std::size_t offset,
+                                  ExpressionResultRange range,
+                                  std::string_view description)
+    {
+        const auto observation = observeEvaluation (program, context, range);
+        expect (! observation.result.success, std::string { description });
+        expect (observation.result.error.code == code, std::string { description });
+        expectEquals (observation.result.error.offset, offset, std::string { description });
+        expectEquals (observation.allocations, std::size_t {}, std::string { description });
     }
 
     void testPrecedenceAndOperators()
@@ -368,6 +378,7 @@ private:
         expectEvaluationFailure ("log(-1)", ExpressionErrorCode::domainError, 0);
         expectEvaluationFailure ("pow(-1, 0.5)", ExpressionErrorCode::domainError, 0);
         expectEvaluationFailure ("pow(0, -1)", ExpressionErrorCode::domainError, 0);
+        expectEvaluationFailure ("clamp(1, 2, 1)", ExpressionErrorCode::domainError, 0);
         expectEvaluationFailure ("exp(10000)", ExpressionErrorCode::nonFiniteResult, 0);
         expectEvaluationFailure ("1e308 * 1e308", ExpressionErrorCode::nonFiniteResult, 6);
 
@@ -380,6 +391,71 @@ private:
                           sourceContext, unitRange);
         expectEvaluation ("1", 1.0, ExpressionVariableSet::source,
                           sourceContext, unitRange);
+
+        beginTest ("Invalid caller-supplied result ranges fail without allocating");
+        const auto constantProgram = ExpressionProgram::compile ("0", ExpressionVariableSet::source);
+        expect (constantProgram.success);
+        if (constantProgram.success)
+        {
+            constexpr auto negativeInfinity = -std::numeric_limits<double>::infinity();
+            constexpr auto positiveInfinity = std::numeric_limits<double>::infinity();
+            constexpr auto quietNaN = std::numeric_limits<double>::quiet_NaN();
+
+            for (const auto range : std::array {
+                     ExpressionResultRange { .minimum = 1.0, .maximum = 0.0 },
+                     ExpressionResultRange { .minimum = quietNaN, .maximum = 1.0 },
+                     ExpressionResultRange { .minimum = negativeInfinity, .maximum = 1.0 },
+                     ExpressionResultRange { .minimum = positiveInfinity, .maximum = 1.0 },
+                     ExpressionResultRange { .minimum = 0.0, .maximum = quietNaN },
+                     ExpressionResultRange { .minimum = 0.0, .maximum = negativeInfinity },
+                     ExpressionResultRange { .minimum = 0.0, .maximum = positiveInfinity } })
+                expectEvaluationFailure (constantProgram.program, sourceContext,
+                                         ExpressionErrorCode::invalidResultRange, 0, range,
+                                         "invalid result range");
+        }
+
+        beginTest ("Non-finite evaluated context variables fail without allocating");
+        struct VariableCase
+        {
+            std::string_view expression;
+            ExpressionVariableSet variables;
+            ExpressionContext context;
+            double ExpressionContext::* member;
+        };
+
+        for (const auto& variableCase : std::array {
+                 VariableCase { "index", ExpressionVariableSet::source,
+                                sourceContext, &ExpressionContext::index },
+                 VariableCase { "fundamental_hz", ExpressionVariableSet::source,
+                                sourceContext, &ExpressionContext::fundamentalHz },
+                 VariableCase { "frequency_hz", ExpressionVariableSet::transfer,
+                                transferContext, &ExpressionContext::frequencyHz },
+                 VariableCase { "nyquist_hz", ExpressionVariableSet::transfer,
+                                transferContext, &ExpressionContext::nyquistHz } })
+        {
+            const auto compiled = ExpressionProgram::compile (variableCase.expression,
+                                                              variableCase.variables);
+            expect (compiled.success, std::string { variableCase.expression });
+            if (! compiled.success)
+                continue;
+
+            for (const auto nonFinite : std::array {
+                     std::numeric_limits<double>::quiet_NaN(),
+                     -std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::infinity() })
+            {
+                auto context = variableCase.context;
+                context.*variableCase.member = nonFinite;
+                expectEvaluationFailure (compiled.program, context,
+                                         ExpressionErrorCode::nonFiniteResult, 0,
+                                         unrestrictedRange, variableCase.expression);
+            }
+        }
+
+        beginTest ("A default expression program fails without allocating");
+        expectEvaluationFailure (ExpressionProgram {}, sourceContext,
+                                 ExpressionErrorCode::invalidProgram, 0,
+                                 unrestrictedRange, "default expression program");
     }
 
     struct ValueCase

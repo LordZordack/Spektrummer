@@ -253,6 +253,10 @@ class ValidatedSpectralPreset final
 private:
     struct ConstructionKey
     {
+    private:
+        ConstructionKey() noexcept = default;
+
+        friend struct SpectralPresetValidationResult;
     };
 
 public:
