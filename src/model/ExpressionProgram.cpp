@@ -585,8 +585,7 @@ private:
                 if (! consume (","))
                 {
                     const auto code = position < source.size()
-                                           && (source[position] == '=' || source[position] == '?'
-                                               || source[position] == ':')
+                                           && isUnsupportedSyntaxToken (source[position])
                                         ? ExpressionErrorCode::unsupportedSyntax
                                         : ExpressionErrorCode::expectedExpression;
                     fail (code, position);

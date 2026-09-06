@@ -305,6 +305,10 @@ private:
                               ExpressionErrorCode::unsupportedSyntax, 3);
         expectCompileFailure ("(1 | 2)", ExpressionVariableSet::source,
                               ExpressionErrorCode::unsupportedSyntax, 3);
+        expectCompileFailure ("abs(1 & 2)", ExpressionVariableSet::source,
+                              ExpressionErrorCode::unsupportedSyntax, 6);
+        expectCompileFailure ("abs(1 | 2)", ExpressionVariableSet::source,
+                              ExpressionErrorCode::unsupportedSyntax, 6);
 
         beginTest ("The source length limit accepts 512 and rejects 513 characters");
         const std::string maximumLengthExpression (512, ' ');
