@@ -1,14 +1,18 @@
 #include <JuceHeader.h>
 
+#include "TestAllocationCounter.h"
 #include "model/SpectralPresetModel.h"
 
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -58,6 +62,7 @@ using spektrummer::model::ExpressionContext;
 using spektrummer::model::ExpressionErrorCode;
 using spektrummer::model::ExpressionEvaluationResult;
 using spektrummer::model::ExpressionResultRange;
+using spektrummer::test::ScopedAllocationCounter;
 
 static_assert (maximumSourceDefinitions == 64);
 static_assert (maximumExpandedPartials == 256);
@@ -116,6 +121,8 @@ static_assert (std::is_same_v<decltype (std::declval<SpectralPresetValidationRes
 static_assert (std::is_same_v<decltype (std::declval<SpectralPresetValidationResult>().error),
                               SpectralModelError>);
 static_assert (! std::is_default_constructible_v<ValidatedSpectralPreset>);
+static_assert (std::is_copy_constructible_v<ValidatedSpectralPreset>);
+static_assert (std::is_copy_assignable_v<ValidatedSpectralPreset>);
 static_assert (std::is_same_v<decltype (std::declval<const ValidatedSpectralPreset&>().sources()),
                               std::span<const ValidatedSourceDefinition>>);
 static_assert (std::is_same_v<decltype (
@@ -220,6 +227,16 @@ constexpr ExpressionResultRange transferResponseRange { .minimum = -96.0,
     return draft;
 }
 
+[[nodiscard]] std::string exactDoubleExpression (double value)
+{
+    std::array<char, 64> buffer {};
+    const auto conversion = std::to_chars (buffer.data(), buffer.data() + buffer.size(), value,
+                                           std::chars_format::general,
+                                           std::numeric_limits<double>::max_digits10);
+    jassert (conversion.ec == std::errc {});
+    return { buffer.data(), conversion.ptr };
+}
+
 class SpectralPresetModelTests final : public juce::UnitTest
 {
 public:
@@ -238,7 +255,10 @@ public:
         testParametricTransferDefinitions();
         testTransferFormulas();
         testCollectionAndExpansionLimits();
-        testValidatedPublicationAndAtomicFailures();
+        testValidatedSourcePayloadPreservation();
+        testValidatedTransferPayloadPreservation();
+        testFixedOwnedStorageAllocations();
+        testAtomicFailures();
     }
 
 private:
@@ -609,25 +629,56 @@ private:
         expectNumericFailure (harmonicLevelDb (generator.count + 1, generator),
                               ModelErrorCode::invalidIndex);
 
-        beginTest ("Harmonic level rejects every invalid input field");
+        beginTest ("Harmonic level rejects both invalid declared-count neighbors");
         auto invalid = generator;
         invalid.count = 0;
         expectNumericFailure (harmonicLevelDb (1, invalid), ModelErrorCode::countOutOfRange);
         invalid = generator;
-        invalid.baseLevelDb = quietNaN;
-        expectNumericFailure (harmonicLevelDb (1, invalid), ModelErrorCode::nonFiniteValue);
-        invalid = generator;
-        invalid.rollOffDbPerOctave = positiveInfinity;
-        expectNumericFailure (harmonicLevelDb (1, invalid), ModelErrorCode::nonFiniteValue);
-        invalid = generator;
-        invalid.evenOffsetDb = 25.0;
-        expectNumericFailure (harmonicLevelDb (2, invalid), ModelErrorCode::valueOutOfRange);
+        invalid.count = 257;
+        expectNumericFailure (harmonicLevelDb (1, invalid), ModelErrorCode::countOutOfRange);
+
+        expectHarmonicLevelFieldFailures (
+            -96.0, 0.0, 1,
+            [] (HarmonicGenerator& value, double scalar) { value.baseLevelDb = scalar; });
+        expectHarmonicLevelFieldFailures (
+            -48.0, 12.0, 2,
+            [] (HarmonicGenerator& value, double scalar) {
+                value.rollOffDbPerOctave = scalar;
+            });
+        expectHarmonicLevelFieldFailures (
+            -96.0, 24.0, 2,
+            [] (HarmonicGenerator& value, double scalar) { value.evenOffsetDb = scalar; });
+
+        beginTest ("Harmonic level rejects invalid non-level generator input");
         invalid = generator;
         invalid.inharmonicStretchB = quietNaN;
         expectNumericFailure (harmonicLevelDb (1, invalid), ModelErrorCode::nonFiniteValue);
-        invalid = generator;
-        invalid.count = 257;
-        expectNumericFailure (harmonicLevelDb (1, invalid), ModelErrorCode::countOutOfRange);
+    }
+
+    template <typename Setter>
+    void expectHarmonicLevelFieldFailures (double minimum,
+                                           double maximum,
+                                           std::size_t index,
+                                           Setter set)
+    {
+        beginTest ("Harmonic level rejects adjacent and non-finite consumed fields");
+        for (const auto value : std::array {
+                 std::nextafter (minimum, negativeInfinity),
+                 std::nextafter (maximum, positiveInfinity) })
+        {
+            auto generator = validHarmonicGenerator();
+            set (generator, value);
+            expectNumericFailure (harmonicLevelDb (index, generator),
+                                  ModelErrorCode::valueOutOfRange);
+        }
+
+        for (const auto value : std::array { quietNaN, negativeInfinity, positiveInfinity })
+        {
+            auto generator = validHarmonicGenerator();
+            set (generator, value);
+            expectNumericFailure (harmonicLevelDb (index, generator),
+                                  ModelErrorCode::nonFiniteValue);
+        }
     }
 
     void testFormulaGenerators()
@@ -648,131 +699,6 @@ private:
             auto formula = validFormulaGenerator();
             formula.count = count;
             expectSourceFailure (formula, ModelErrorCode::countOutOfRange, ModelField::count);
-        }
-
-        beginTest ("Source formulas compile separately with source-only variables");
-        auto formula = validFormulaGenerator();
-        formula.frequencyExpression = "index + fundamental_hz / nyquist_hz";
-        formula.levelExpression = "-index";
-        auto result = validatePreset (draftWithSource (formula));
-        expect (result.preset.has_value());
-        if (result.preset)
-        {
-            const auto sources = result.preset->sources();
-            expectEquals (sources.size(), std::size_t { 1 });
-            if (sources.size() == 1)
-                if (const auto* validated = std::get_if<ValidatedFormulaGenerator> (&sources[0]))
-                {
-                    expect (validated->mode == FormulaFrequencyMode::trackedRatio);
-                    expectEquals (validated->count, std::size_t { 8 });
-                    expectEvaluationSuccess (
-                        validated->frequencyProgram.evaluate (sourceContext, trackedRatioRange),
-                        3.0 + 110.0 / 24000.0);
-                    expectEvaluationSuccess (
-                        validated->levelProgram.evaluate (sourceContext, sourceLevelRange), -3.0);
-                }
-                else
-                {
-                    expect (false, "Validated source must retain the formula variant");
-                }
-        }
-
-        beginTest ("Tracked and fixed formula programs enforce distinct frequency ranges");
-        for (const auto mode : std::array { FormulaFrequencyMode::trackedRatio,
-                                           FormulaFrequencyMode::fixedHz })
-        {
-            auto boundaryFormula = validFormulaGenerator (mode);
-            boundaryFormula.frequencyExpression = mode == FormulaFrequencyMode::trackedRatio
-                                                      ? "if(index == 1, 0.000001, 65536)"
-                                                      : "if(index == 1, 1, 192000)";
-            boundaryFormula.levelExpression = "if(index == 1, -96, 0)";
-            const auto validatedResult = validatePreset (draftWithSource (boundaryFormula));
-            expect (validatedResult.preset.has_value());
-            if (! validatedResult.preset)
-                continue;
-
-            const auto* validated = std::get_if<ValidatedFormulaGenerator> (
-                &validatedResult.preset->sources()[0]);
-            expect (validated != nullptr);
-            if (validated == nullptr)
-                continue;
-
-            const auto frequencyRange = mode == FormulaFrequencyMode::trackedRatio
-                                            ? trackedRatioRange
-                                            : fixedFrequencyRange;
-            auto context = sourceContext;
-            context.index = 1.0;
-            expectEvaluationSuccess (
-                validated->frequencyProgram.evaluate (context, frequencyRange),
-                frequencyRange.minimum);
-            expectEvaluationSuccess (
-                validated->levelProgram.evaluate (context, sourceLevelRange), -96.0);
-            context.index = 2.0;
-            expectEvaluationSuccess (
-                validated->frequencyProgram.evaluate (context, frequencyRange),
-                frequencyRange.maximum);
-            expectEvaluationSuccess (
-                validated->levelProgram.evaluate (context, sourceLevelRange), 0.0);
-        }
-
-        beginTest ("Formula range, domain, and non-finite failures remain evaluator errors");
-        for (const auto expression : std::array<std::string, 4> {
-                 "0", "65537", "log(-1)", "exp(10000)" })
-        {
-            auto invalidResultFormula = validFormulaGenerator();
-            invalidResultFormula.frequencyExpression = expression;
-            const auto validatedResult = validatePreset (draftWithSource (invalidResultFormula));
-            expect (validatedResult.preset.has_value());
-            if (! validatedResult.preset)
-                continue;
-            const auto* validated = std::get_if<ValidatedFormulaGenerator> (
-                &validatedResult.preset->sources()[0]);
-            expect (validated != nullptr);
-            if (validated == nullptr)
-                continue;
-
-            const auto evaluation = validated->frequencyProgram.evaluate (sourceContext,
-                                                                           trackedRatioRange);
-            if (expression == "0" || expression == "65537")
-                expectEvaluationFailure (evaluation, ExpressionErrorCode::resultOutOfRange, 0);
-            else if (expression == "log(-1)")
-                expectEvaluationFailure (evaluation, ExpressionErrorCode::domainError, 0);
-            else
-                expectEvaluationFailure (evaluation, ExpressionErrorCode::nonFiniteResult, 0);
-        }
-
-        beginTest ("Fixed-Hz formula results reject values outside their own range");
-        for (const auto expression : std::array<std::string, 2> { "0", "192001" })
-        {
-            auto invalidResultFormula = validFormulaGenerator (FormulaFrequencyMode::fixedHz);
-            invalidResultFormula.frequencyExpression = expression;
-            const auto validatedResult = validatePreset (draftWithSource (invalidResultFormula));
-            expect (validatedResult.preset.has_value());
-            if (! validatedResult.preset)
-                continue;
-            const auto* validated = std::get_if<ValidatedFormulaGenerator> (
-                &validatedResult.preset->sources()[0]);
-            expect (validated != nullptr);
-            if (validated != nullptr)
-                expectEvaluationFailure (
-                    validated->frequencyProgram.evaluate (sourceContext, fixedFrequencyRange),
-                    ExpressionErrorCode::resultOutOfRange, 0);
-        }
-
-        beginTest ("Formula level overflow is an error and is never clamped");
-        auto overflowingLevel = validFormulaGenerator();
-        overflowingLevel.levelExpression = "1";
-        result = validatePreset (draftWithSource (overflowingLevel));
-        expect (result.preset.has_value());
-        if (result.preset)
-        {
-            const auto* validated = std::get_if<ValidatedFormulaGenerator> (
-                &result.preset->sources()[0]);
-            expect (validated != nullptr);
-            if (validated != nullptr)
-                expectEvaluationFailure (
-                    validated->levelProgram.evaluate (sourceContext, sourceLevelRange),
-                    ExpressionErrorCode::resultOutOfRange, 0);
         }
 
         beginTest ("Formula compilation reports exact source field and expression error");
@@ -796,6 +722,110 @@ private:
         expectFailure (draftWithSource (malformed), ModelErrorCode::expressionCompileFailed,
                        ModelField::levelExpression, 0, noIndex, noIndex,
                        ExpressionErrorCode::unknownIdentifier, 0);
+
+        beginTest ("Formula mode rejects invalid underlying enum values");
+        auto invalidMode = validFormulaGenerator();
+        invalidMode.mode = static_cast<FormulaFrequencyMode> (255);
+        expectSourceFailure (invalidMode, ModelErrorCode::invalidEnumValue,
+                             ModelField::formulaFrequencyMode);
+
+        testFormulaResultBoundaries();
+        testFormulaEvaluationFailures();
+    }
+
+    void testFormulaResultBoundaries()
+    {
+        beginTest ("Tracked-ratio formula results accept endpoints and reject adjacent values");
+        testFormulaRange (FormulaFrequencyMode::trackedRatio, true, trackedRatioRange);
+
+        beginTest ("Fixed-Hz formula results accept endpoints and reject adjacent values");
+        testFormulaRange (FormulaFrequencyMode::fixedHz, true, fixedFrequencyRange);
+
+        beginTest ("Source-level formula results accept endpoints and reject adjacent values");
+        testFormulaRange (FormulaFrequencyMode::trackedRatio, false, sourceLevelRange);
+    }
+
+    void testFormulaRange (FormulaFrequencyMode mode,
+                           bool frequencyProgram,
+                           ExpressionResultRange range)
+    {
+        for (const auto endpoint : std::array { range.minimum, range.maximum })
+            expectFormulaProgramValue (mode, frequencyProgram,
+                                       exactDoubleExpression (endpoint), range, endpoint);
+
+        for (const auto outsider : std::array {
+                 std::nextafter (range.minimum, negativeInfinity),
+                 std::nextafter (range.maximum, positiveInfinity) })
+            expectFormulaProgramFailure (mode, frequencyProgram,
+                                         exactDoubleExpression (outsider), range,
+                                         ExpressionErrorCode::resultOutOfRange);
+    }
+
+    void testFormulaEvaluationFailures()
+    {
+        beginTest ("Formula domain and non-finite failures remain evaluator errors");
+        expectFormulaProgramFailure (FormulaFrequencyMode::trackedRatio, true, "log(-1)",
+                                     trackedRatioRange, ExpressionErrorCode::domainError);
+        expectFormulaProgramFailure (FormulaFrequencyMode::trackedRatio, true, "exp(10000)",
+                                     trackedRatioRange, ExpressionErrorCode::nonFiniteResult);
+    }
+
+    void expectFormulaProgramValue (FormulaFrequencyMode mode,
+                                    bool frequencyProgram,
+                                    std::string expression,
+                                    ExpressionResultRange range,
+                                    double expected)
+    {
+        auto formula = validFormulaGenerator (mode);
+        if (frequencyProgram)
+            formula.frequencyExpression = std::move (expression);
+        else
+            formula.levelExpression = std::move (expression);
+
+        const auto result = validatePreset (draftWithSource (formula));
+        expect (result.preset.has_value());
+        if (! result.preset)
+            return;
+
+        const auto* validated = std::get_if<ValidatedFormulaGenerator> (
+            &result.preset->sources()[0]);
+        expect (validated != nullptr);
+        if (validated == nullptr)
+            return;
+
+        const auto evaluation = frequencyProgram
+                                    ? validated->frequencyProgram.evaluate (sourceContext, range)
+                                    : validated->levelProgram.evaluate (sourceContext, range);
+        expectEvaluationSuccess (evaluation, expected);
+    }
+
+    void expectFormulaProgramFailure (FormulaFrequencyMode mode,
+                                      bool frequencyProgram,
+                                      std::string expression,
+                                      ExpressionResultRange range,
+                                      ExpressionErrorCode code)
+    {
+        auto formula = validFormulaGenerator (mode);
+        if (frequencyProgram)
+            formula.frequencyExpression = std::move (expression);
+        else
+            formula.levelExpression = std::move (expression);
+
+        const auto result = validatePreset (draftWithSource (formula));
+        expect (result.preset.has_value());
+        if (! result.preset)
+            return;
+
+        const auto* validated = std::get_if<ValidatedFormulaGenerator> (
+            &result.preset->sources()[0]);
+        expect (validated != nullptr);
+        if (validated == nullptr)
+            return;
+
+        const auto evaluation = frequencyProgram
+                                    ? validated->frequencyProgram.evaluate (sourceContext, range)
+                                    : validated->levelProgram.evaluate (sourceContext, range);
+        expectEvaluationFailure (evaluation, code, 0);
     }
 
     void testFreeCurves()
@@ -813,29 +843,32 @@ private:
         expectSuccess (draftWithLayer (maximumCurve));
 
         beginTest ("Validated free curves preserve endpoint points and fixed-capacity count");
-        const auto result = validatePreset (draftWithLayer (maximumCurve));
-        expect (result.preset.has_value());
-        if (result.preset)
         {
-            const auto layers = result.preset->transferLayers();
-            expectEquals (layers.size(), std::size_t { 1 });
-            if (layers.size() == 1)
-                if (const auto* curve = std::get_if<ValidatedFreeCurve> (&layers[0].definition))
-                {
-                    const auto points = curve->points();
-                    expectEquals (points.size(), maximumFreeCurvePoints);
-                    if (! points.empty())
+            const auto result = validatePreset (draftWithLayer (maximumCurve));
+            expect (result.preset.has_value());
+            if (result.preset)
+            {
+                const auto layers = result.preset->transferLayers();
+                expectEquals (layers.size(), std::size_t { 1 });
+                if (layers.size() == 1)
+                    if (const auto* curve = std::get_if<ValidatedFreeCurve> (
+                            &layers[0].definition))
                     {
-                        expectEquals (points.front().frequencyHz, 1.0);
-                        expectEquals (points.front().responseDb, -96.0);
-                        expectEquals (points.back().frequencyHz, 192000.0);
-                        expectEquals (points.back().responseDb, 24.0);
+                        const auto points = curve->points();
+                        expectEquals (points.size(), maximumFreeCurvePoints);
+                        if (! points.empty())
+                        {
+                            expectEquals (points.front().frequencyHz, 1.0);
+                            expectEquals (points.front().responseDb, -96.0);
+                            expectEquals (points.back().frequencyHz, 192000.0);
+                            expectEquals (points.back().responseDb, 24.0);
+                        }
                     }
-                }
-                else
-                {
-                    expect (false, "Validated transfer must retain the free-curve variant");
-                }
+                    else
+                    {
+                        expect (false, "Validated transfer must retain the free-curve variant");
+                    }
+            }
         }
 
         beginTest ("Free curves reject zero and 65 points before indexing a point");
@@ -899,6 +932,12 @@ private:
         beginTest ("Both shelf kinds reject every immediate outsider and non-finite scalar");
         testPeakOrShelfFailures (true, ShelfKind::low);
         testPeakOrShelfFailures (true, ShelfKind::high);
+
+        beginTest ("Shelf kind rejects invalid underlying enum values");
+        auto invalidShelf = validShelf();
+        invalidShelf.kind = static_cast<ShelfKind> (255);
+        expectLayerFailure (invalidShelf, ModelErrorCode::invalidEnumValue,
+                            ModelField::shelfKind);
 
         beginTest ("Tilt accepts frequency and signed-slope endpoints");
         for (const auto frequency : std::array { 1.0, 192000.0 })
@@ -987,20 +1026,6 @@ private:
     {
         beginTest ("Transfer formulas compile only transfer variables");
         auto formula = validTransferFormula();
-        formula.expression = "frequency_hz / nyquist_hz";
-        auto result = validatePreset (draftWithLayer (formula));
-        expect (result.preset.has_value());
-        if (result.preset)
-        {
-            const auto* validated = std::get_if<ValidatedTransferFormula> (
-                &result.preset->transferLayers()[0].definition);
-            expect (validated != nullptr);
-            if (validated != nullptr)
-                expectEvaluationSuccess (
-                    validated->program.evaluate (transferContext, transferResponseRange),
-                    1000.0 / 24000.0);
-        }
-
         for (const auto expression : std::array<std::string, 2> { "index", "fundamental_hz" })
         {
             formula.expression = expression;
@@ -1013,46 +1038,52 @@ private:
                        ModelField::transferExpression, noIndex, 0, noIndex,
                        ExpressionErrorCode::expectedExpression, 3);
 
-        beginTest ("Transfer formula response endpoints are inclusive");
-        formula.expression = "if(frequency_hz < nyquist_hz, -96, 24)";
-        result = validatePreset (draftWithLayer (formula));
-        expect (result.preset.has_value());
-        if (result.preset)
-        {
-            const auto* validated = std::get_if<ValidatedTransferFormula> (
-                &result.preset->transferLayers()[0].definition);
-            expect (validated != nullptr);
-            if (validated != nullptr)
-            {
-                expectEvaluationSuccess (
-                    validated->program.evaluate (transferContext, transferResponseRange), -96.0);
-                auto atNyquist = transferContext;
-                atNyquist.frequencyHz = atNyquist.nyquistHz;
-                expectEvaluationSuccess (
-                    validated->program.evaluate (atNyquist, transferResponseRange), 24.0);
-            }
-        }
+        beginTest ("Transfer formula responses accept endpoints and reject adjacent values");
+        for (const auto endpoint : std::array {
+                 transferResponseRange.minimum, transferResponseRange.maximum })
+            expectTransferFormulaValue (exactDoubleExpression (endpoint), endpoint);
 
-        beginTest ("Transfer formula domain, non-finite, and range failures are rejected");
-        for (const auto& testCase : std::array {
-                 FormulaErrorCase { "log(-1)", ExpressionErrorCode::domainError },
-                 FormulaErrorCase { "exp(10000)", ExpressionErrorCode::nonFiniteResult },
-                 FormulaErrorCase { "-97", ExpressionErrorCode::resultOutOfRange },
-                 FormulaErrorCase { "25", ExpressionErrorCode::resultOutOfRange } })
-        {
-            formula.expression = testCase.expression;
-            result = validatePreset (draftWithLayer (formula));
-            expect (result.preset.has_value());
-            if (! result.preset)
-                continue;
-            const auto* validated = std::get_if<ValidatedTransferFormula> (
-                &result.preset->transferLayers()[0].definition);
-            expect (validated != nullptr);
-            if (validated != nullptr)
-                expectEvaluationFailure (
-                    validated->program.evaluate (transferContext, transferResponseRange),
-                    testCase.code, 0);
-        }
+        for (const auto outsider : std::array {
+                 std::nextafter (transferResponseRange.minimum, negativeInfinity),
+                 std::nextafter (transferResponseRange.maximum, positiveInfinity) })
+            expectTransferFormulaFailure (exactDoubleExpression (outsider),
+                                          ExpressionErrorCode::resultOutOfRange);
+
+        beginTest ("Transfer formula domain and non-finite failures are rejected");
+        expectTransferFormulaFailure ("log(-1)", ExpressionErrorCode::domainError);
+        expectTransferFormulaFailure ("exp(10000)", ExpressionErrorCode::nonFiniteResult);
+    }
+
+    void expectTransferFormulaValue (std::string expression, double expected)
+    {
+        const auto result = validatePreset (
+            draftWithLayer (TransferFormula { .expression = std::move (expression) }));
+        expect (result.preset.has_value());
+        if (! result.preset)
+            return;
+
+        const auto* validated = std::get_if<ValidatedTransferFormula> (
+            &result.preset->transferLayers()[0].definition);
+        expect (validated != nullptr);
+        if (validated != nullptr)
+            expectEvaluationSuccess (
+                validated->program.evaluate (transferContext, transferResponseRange), expected);
+    }
+
+    void expectTransferFormulaFailure (std::string expression, ExpressionErrorCode code)
+    {
+        const auto result = validatePreset (
+            draftWithLayer (TransferFormula { .expression = std::move (expression) }));
+        expect (result.preset.has_value());
+        if (! result.preset)
+            return;
+
+        const auto* validated = std::get_if<ValidatedTransferFormula> (
+            &result.preset->transferLayers()[0].definition);
+        expect (validated != nullptr);
+        if (validated != nullptr)
+            expectEvaluationFailure (
+                validated->program.evaluate (transferContext, transferResponseRange), code, 0);
     }
 
     void testCollectionAndExpansionLimits()
@@ -1085,6 +1116,19 @@ private:
         exactExpansion.sources = { generator, validTrackedPartial() };
         expectSuccess (exactExpansion);
 
+        beginTest ("Formula generators contribute their full declared count to expansion");
+        SpectralPresetDraft exactFormulaExpansion;
+        auto formulaGenerator = validFormulaGenerator();
+        formulaGenerator.count = 255;
+        exactFormulaExpansion.sources = { formulaGenerator, validFixedPartial() };
+        expectSuccess (exactFormulaExpansion);
+
+        formulaGenerator.count = 256;
+        SpectralPresetDraft excessiveFormulaExpansion;
+        excessiveFormulaExpansion.sources = { formulaGenerator, validFixedPartial() };
+        expectFailure (excessiveFormulaExpansion, ModelErrorCode::capacityExceeded,
+                       ModelField::expandedPartialCount, 1);
+
         beginTest ("Tracked and fixed partials each contribute one declared partial");
         SpectralPresetDraft mixedExpansion;
         auto firstGenerator = validFormulaGenerator();
@@ -1110,21 +1154,16 @@ private:
                        ModelField::count, 1);
     }
 
-    void testValidatedPublicationAndAtomicFailures()
+    void testValidatedSourcePayloadPreservation()
     {
-        beginTest ("Successful validation preserves source variants and canonical order");
+        beginTest ("Validated sources preserve every field and both compiled formula programs");
         SpectralPresetDraft draft;
         draft.sources = {
-            TrackedPartial { 2.0, -1.0 },
-            FixedPartial { 220.0, -2.0 },
-            HarmonicGenerator { 3, -3.0, -4.0, -5.0, 0.006 },
-            FormulaGenerator { FormulaFrequencyMode::fixedHz, 4,
-                               "fundamental_hz * index", "-index" }
-        };
-        draft.transferLayers = {
-            { .enabled = false, .definition = PeakNotch { 101.0, -1.0, 0.5 } },
-            { .enabled = true, .definition = Shelf { ShelfKind::high, 202.0, 2.0, 0.7 } },
-            { .enabled = false, .definition = Tilt { 303.0, 3.0 } }
+            TrackedPartial { 1.25, -11.125 },
+            FixedPartial { 2222.0, -22.25 },
+            HarmonicGenerator { 7, -33.5, -8.25, 2.75, 0.004 },
+            FormulaGenerator { FormulaFrequencyMode::fixedHz, 9,
+                               "fundamental_hz + index * 17", "-40 + index * 2" }
         };
         const auto result = validatePreset (draft);
         expect (result.preset.has_value());
@@ -1143,40 +1182,196 @@ private:
                 expect (harmonic != nullptr);
                 expect (formula != nullptr);
                 if (tracked != nullptr)
-                    expectEquals (tracked->ratio, 2.0);
+                {
+                    expectEquals (tracked->ratio, 1.25);
+                    expectEquals (tracked->levelDb, -11.125);
+                }
                 if (fixed != nullptr)
-                    expectEquals (fixed->frequencyHz, 220.0);
+                {
+                    expectEquals (fixed->frequencyHz, 2222.0);
+                    expectEquals (fixed->levelDb, -22.25);
+                }
                 if (harmonic != nullptr)
-                    expectEquals (harmonic->count, std::size_t { 3 });
+                {
+                    expectEquals (harmonic->count, std::size_t { 7 });
+                    expectEquals (harmonic->baseLevelDb, -33.5);
+                    expectEquals (harmonic->rollOffDbPerOctave, -8.25);
+                    expectEquals (harmonic->evenOffsetDb, 2.75);
+                    expectEquals (harmonic->inharmonicStretchB, 0.004);
+                }
                 if (formula != nullptr)
+                {
                     expect (formula->mode == FormulaFrequencyMode::fixedHz);
+                    expectEquals (formula->count, std::size_t { 9 });
+                    expectEvaluationSuccess (
+                        formula->frequencyProgram.evaluate (sourceContext,
+                                                            fixedFrequencyRange),
+                        161.0);
+                    expectEvaluationSuccess (
+                        formula->levelProgram.evaluate (sourceContext, sourceLevelRange),
+                        -34.0);
+                }
             }
+        }
+    }
 
+    void testValidatedTransferPayloadPreservation()
+    {
+        beginTest ("Validated transfers preserve every field, flag, point, and program");
+        SpectralPresetDraft draft;
+        draft.transferLayers = {
+            { .enabled = false,
+              .definition = FreeCurve {
+                  .points = { { 11.0, -91.0 }, { 222.0, 2.5 }, { 3333.0, 23.5 } }
+              } },
+            { .enabled = true, .definition = PeakNotch { 444.0, -4.5, 0.4 } },
+            { .enabled = false,
+              .definition = Shelf { ShelfKind::high, 555.0, 5.5, 0.5 } },
+            { .enabled = true, .definition = Tilt { 666.0, -6.5 } },
+            { .enabled = false,
+              .definition = TransferFormula {
+                  "frequency_hz / 1000 + nyquist_hz / 12000"
+              } }
+        };
+        const auto result = validatePreset (draft);
+        expect (result.preset.has_value());
+        if (result.preset)
+        {
             const auto layers = result.preset->transferLayers();
-            expectEquals (layers.size(), std::size_t { 3 });
-            if (layers.size() == 3)
+            expectEquals (layers.size(), std::size_t { 5 });
+            if (layers.size() == 5)
             {
                 expect (! layers[0].enabled);
                 expect (layers[1].enabled);
                 expect (! layers[2].enabled);
-                const auto* peak = std::get_if<PeakNotch> (&layers[0].definition);
-                const auto* shelf = std::get_if<Shelf> (&layers[1].definition);
-                const auto* tilt = std::get_if<Tilt> (&layers[2].definition);
+                expect (layers[3].enabled);
+                expect (! layers[4].enabled);
+                const auto* curve = std::get_if<ValidatedFreeCurve> (&layers[0].definition);
+                const auto* peak = std::get_if<PeakNotch> (&layers[1].definition);
+                const auto* shelf = std::get_if<Shelf> (&layers[2].definition);
+                const auto* tilt = std::get_if<Tilt> (&layers[3].definition);
+                const auto* formula = std::get_if<ValidatedTransferFormula> (
+                    &layers[4].definition);
+                expect (curve != nullptr);
                 expect (peak != nullptr);
                 expect (shelf != nullptr);
                 expect (tilt != nullptr);
+                expect (formula != nullptr);
+                if (curve != nullptr)
+                {
+                    const auto points = curve->points();
+                    expectEquals (points.size(), std::size_t { 3 });
+                    if (points.size() == 3)
+                    {
+                        expectEquals (points[0].frequencyHz, 11.0);
+                        expectEquals (points[0].responseDb, -91.0);
+                        expectEquals (points[1].frequencyHz, 222.0);
+                        expectEquals (points[1].responseDb, 2.5);
+                        expectEquals (points[2].frequencyHz, 3333.0);
+                        expectEquals (points[2].responseDb, 23.5);
+                    }
+                }
                 if (peak != nullptr)
-                    expectEquals (peak->frequencyHz, 101.0);
+                {
+                    expectEquals (peak->frequencyHz, 444.0);
+                    expectEquals (peak->gainDb, -4.5);
+                    expectEquals (peak->q, 0.4);
+                }
                 if (shelf != nullptr)
                 {
                     expect (shelf->kind == ShelfKind::high);
-                    expectEquals (shelf->frequencyHz, 202.0);
+                    expectEquals (shelf->frequencyHz, 555.0);
+                    expectEquals (shelf->gainDb, 5.5);
+                    expectEquals (shelf->q, 0.5);
                 }
                 if (tilt != nullptr)
-                    expectEquals (tilt->frequencyHz, 303.0);
+                {
+                    expectEquals (tilt->frequencyHz, 666.0);
+                    expectEquals (tilt->slopeDbPerOctave, -6.5);
+                }
+                if (formula != nullptr)
+                    expectEvaluationSuccess (
+                        formula->program.evaluate (transferContext, transferResponseRange),
+                        3.0);
             }
         }
+    }
 
+    void testFixedOwnedStorageAllocations()
+    {
+        beginTest ("Maximum validation owns fixed storage without allocating");
+        SpectralPresetDraft maximumDraft;
+        auto maximumSource = validHarmonicGenerator();
+        maximumSource.count = 4;
+        maximumDraft.sources.assign (maximumSourceDefinitions, maximumSource);
+
+        FreeCurve maximumCurve;
+        maximumCurve.points.reserve (maximumFreeCurvePoints);
+        for (auto index = std::size_t {}; index < maximumFreeCurvePoints; ++index)
+            maximumCurve.points.push_back ({ 1.0 + static_cast<double> (index) * 100.0,
+                                             -96.0 + static_cast<double> (index) });
+        maximumDraft.transferLayers.assign (
+            maximumTransferLayers,
+            TransferLayer { .enabled = true, .definition = maximumCurve });
+
+        auto validation = std::make_unique<SpectralPresetValidationResult>();
+        std::size_t validationAllocations = 0;
+        {
+            ScopedAllocationCounter counter;
+            *validation = validatePreset (maximumDraft);
+            validationAllocations = counter.stop();
+        }
+
+        expectEquals (validationAllocations, std::size_t {});
+        expect (validation->preset.has_value());
+        if (! validation->preset)
+            return;
+
+        beginTest ("Maximum validated spans and nested fixed points allocate nothing");
+        std::size_t accessAllocations = 0;
+        std::size_t observedSources = 0;
+        std::size_t observedLayers = 0;
+        std::size_t observedPoints = 0;
+        std::size_t observedExpandedPartials = 0;
+        {
+            ScopedAllocationCounter counter;
+            const auto sources = validation->preset->sources();
+            const auto layers = validation->preset->transferLayers();
+            observedSources = sources.size();
+            observedLayers = layers.size();
+            for (const auto& source : sources)
+                observedExpandedPartials += std::get<HarmonicGenerator> (source).count;
+            for (const auto& layer : layers)
+                observedPoints += std::get<ValidatedFreeCurve> (layer.definition).points().size();
+            accessAllocations = counter.stop();
+        }
+
+        expectEquals (accessAllocations, std::size_t {});
+        expectEquals (observedSources, maximumSourceDefinitions);
+        expectEquals (observedLayers, maximumTransferLayers);
+        expectEquals (observedExpandedPartials, maximumExpandedPartials);
+        expectEquals (observedPoints, maximumTransferLayers * maximumFreeCurvePoints);
+
+        beginTest ("Copying a maximum validated preset into preallocated storage allocates nothing");
+        auto copiedPreset = std::make_unique<std::optional<ValidatedSpectralPreset>>();
+        std::size_t copyAllocations = 0;
+        {
+            ScopedAllocationCounter counter;
+            *copiedPreset = validation->preset;
+            copyAllocations = counter.stop();
+        }
+
+        expectEquals (copyAllocations, std::size_t {});
+        expect (copiedPreset->has_value());
+        if (*copiedPreset)
+        {
+            expectEquals ((*copiedPreset)->sources().size(), maximumSourceDefinitions);
+            expectEquals ((*copiedPreset)->transferLayers().size(), maximumTransferLayers);
+        }
+    }
+
+    void testAtomicFailures()
+    {
         beginTest ("Disabled layers retain order but still require valid payloads");
         SpectralPresetDraft disabledInvalid;
         disabledInvalid.transferLayers = {
@@ -1228,12 +1423,6 @@ private:
         expectFailure (pointAtomic, ModelErrorCode::nonFiniteValue, ModelField::responseDb,
                        noIndex, 1, 1);
     }
-
-    struct FormulaErrorCase
-    {
-        std::string expression;
-        ExpressionErrorCode code = ExpressionErrorCode::none;
-    };
 };
 
 SpectralPresetModelTests spectralPresetModelTests;
